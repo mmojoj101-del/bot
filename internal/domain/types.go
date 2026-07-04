@@ -48,17 +48,7 @@ const (
 	ConnectorTypeHTTPServer ConnectorType = "http_server"
 	ConnectorTypeSIPClient  ConnectorType = "sip_client"
 	ConnectorTypeSIPServer  ConnectorType = "sip_server"
-	ConnectorTypeMock       ConnectorType = "mock"
-)
-
-// ConnectorStatus represents the operational status of a connector.
-type ConnectorStatus string
-
-const (
-	ConnectorStatusActive   ConnectorStatus = "active"
-	ConnectorStatusDisabled ConnectorStatus = "disabled"
-	ConnectorStatusTesting  ConnectorStatus = "testing"
-	ConnectorStatusError    ConnectorStatus = "error"
+	ConnectorTypeMock       ConnectorType = "mock" // for development/testing only
 )
 
 // RouteType represents the type of a route.

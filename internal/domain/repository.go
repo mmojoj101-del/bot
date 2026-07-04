@@ -60,7 +60,7 @@ type ConnectorRepository interface {
 	GetByID(ctx context.Context, id string) (*Connector, error)
 	Update(ctx context.Context, id string, input UpdateConnectorInput, updatedBy string, version int) (*Connector, error)
 	Delete(ctx context.Context, id string) error
-	ListByTenant(ctx context.Context, tenantID string, page Page) (PageResult[Connector], error)
+	ListByTenant(ctx context.Context, filter ConnectorFilter) (PageResult[Connector], error)
 	CountByTenant(ctx context.Context, tenantID string) (int64, error)
 }
 

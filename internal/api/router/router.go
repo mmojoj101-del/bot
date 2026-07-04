@@ -42,6 +42,7 @@ func New(
 	_ = pgrepo.NewRouteRepository(db)      // will be used in Phase 2.2+
 	auditRepo := pgrepo.NewAuditLogRepository(db)
 	refreshTokenRepo := pgrepo.NewRefreshTokenRepository(db)
+	txManager := pgrepo.NewTxManager(db)
 
 	// ============================================================
 	// Initialize services
@@ -53,7 +54,7 @@ func New(
 	tenantService := service.NewTenantService(tenantRepo, memberRepo, auditRepo, eventBus, clock)
 	memberService := service.NewMemberService(memberRepo, auditRepo, eventBus, clock)
 	apiKeyService := service.NewAPIKeyService(apiKeyRepo, auditRepo, eventBus, cfg.JWT.Secret, clock)
-	connectorService := service.NewConnectorService(connectorRepo, auditRepo, eventBus, clock)
+	connectorService := service.NewConnectorService(connectorRepo, auditRepo, txManager, eventBus, clock)
 	auditService := service.NewAuditService(auditRepo)
 
 	// ============================================================

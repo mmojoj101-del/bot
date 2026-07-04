@@ -47,7 +47,6 @@ func (r *mockConnectorRepo) Create(ctx context.Context, input domain.CreateConne
 		Name:      input.Name,
 		Status:    status,
 		Config:    input.Config,
-		Enabled:   true,
 		CreatedBy: createdBy,
 		UpdatedBy: createdBy,
 	}
@@ -89,9 +88,6 @@ func (r *mockConnectorRepo) Update(ctx context.Context, id string, input domain.
 	if input.Status != nil {
 		c.Status = *input.Status
 	}
-	if input.Enabled != nil {
-		c.Enabled = *input.Enabled
-	}
 	if input.Config != nil {
 		c.Config = input.Config
 	}
@@ -110,20 +106,40 @@ func (r *mockConnectorRepo) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-func (r *mockConnectorRepo) ListByTenant(ctx context.Context, tenantID string, page domain.Page) (domain.PageResult[domain.Connector], error) {
+func (r *mockConnectorRepo) ListByTenant(ctx context.Context, filter domain.ConnectorFilter) (domain.PageResult[domain.Connector], error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var items []domain.Connector
 	for _, c := range r.connectors {
-		if c.TenantID == tenantID {
-			items = append(items, *c)
+		if c.TenantID != filter.TenantID {
+			continue
 		}
+		if filter.Type != nil && c.Type != *filter.Type {
+			continue
+		}
+		if filter.Status != nil && c.Status != *filter.Status {
+			continue
+		}
+		if filter.Search != "" && !contains(c.Name, filter.Search) {
+			continue
+		}
+		items = append(items, *c)
 	}
-	return domain.PageResult[domain.Connector]{Items: items, Total: int64(len(items)), Page: page}, nil
+	return domain.PageResult[domain.Connector]{Items: items, Total: int64(len(items)), Page: filter.Page}, nil
 }
 
 func (r *mockConnectorRepo) CountByTenant(ctx context.Context, tenantID string) (int64, error) {
 	return 0, nil
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0)
+}
+
+type mockTxManager struct{}
+
+func (m *mockTxManager) WithinTransaction(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
 }
 
 func setupConnectorService() (*ConnectorService, *mockConnectorRepo, *mockAuditRepo, *event.MemoryBus) {
@@ -131,8 +147,9 @@ func setupConnectorService() (*ConnectorService, *mockConnectorRepo, *mockAuditR
 	auditRepo := &mockAuditRepo{}
 	bus := event.NewMemoryBus()
 	clock := &mockClock{now: time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)}
+	txManager := &mockTxManager{}
 
-	svc := NewConnectorService(repo, auditRepo, bus, clock)
+	svc := NewConnectorService(repo, auditRepo, txManager, bus, clock)
 	return svc, repo, auditRepo, bus
 }
 
@@ -156,9 +173,6 @@ func TestCreateConnector_Success(t *testing.T) {
 	}
 	if connector.Status != domain.ConnectorStatusActive {
 		t.Fatalf("status = %s, want active", connector.Status)
-	}
-	if !connector.Enabled {
-		t.Fatal("connector should be enabled by default")
 	}
 }
 
@@ -251,10 +265,8 @@ func TestUpdateConnector_Success(t *testing.T) {
 	}
 
 	newName := "New Name"
-	enabled := false
 	updated, err := svc.Update(context.Background(), created.ID, domain.UpdateConnectorInput{
-		Name:    &newName,
-		Enabled: &enabled,
+		Name: &newName,
 	}, "user-1", uuid.New().String(), "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Update() failed: %v", err)
@@ -262,8 +274,29 @@ func TestUpdateConnector_Success(t *testing.T) {
 	if updated.Name != newName {
 		t.Fatalf("name = %s, want %s", updated.Name, newName)
 	}
-	if updated.Enabled {
-		t.Fatal("enabled should be false")
+}
+
+func TestUpdateConnector_Status(t *testing.T) {
+	svc, _, _, _ := setupConnectorService()
+
+	created, err := svc.Create(context.Background(), domain.CreateConnectorInput{
+		TenantID: "tenant-1",
+		Type:     domain.ConnectorTypeHTTPClient,
+		Name:     "Test Connector",
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+
+	disabled := domain.ConnectorStatusDisabled
+	updated, err := svc.Update(context.Background(), created.ID, domain.UpdateConnectorInput{
+		Status: &disabled,
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Update() failed: %v", err)
+	}
+	if updated.Status != domain.ConnectorStatusDisabled {
+		t.Fatalf("status = %s, want disabled", updated.Status)
 	}
 }
 
@@ -338,7 +371,10 @@ func TestListConnectors_ByTenant(t *testing.T) {
 	}
 
 	// List tenant-1
-	result, err := svc.ListByTenant(context.Background(), "tenant-1", domain.Page{Limit: 10, Offset: 0})
+	result, err := svc.ListByTenant(context.Background(), domain.ConnectorFilter{
+		TenantID: "tenant-1",
+		Page:     domain.Page{Limit: 10, Offset: 0},
+	})
 	if err != nil {
 		t.Fatalf("ListByTenant() failed: %v", err)
 	}
@@ -347,12 +383,73 @@ func TestListConnectors_ByTenant(t *testing.T) {
 	}
 
 	// List tenant-2
-	result2, err := svc.ListByTenant(context.Background(), "tenant-2", domain.Page{Limit: 10, Offset: 0})
+	result2, err := svc.ListByTenant(context.Background(), domain.ConnectorFilter{
+		TenantID: "tenant-2",
+		Page:     domain.Page{Limit: 10, Offset: 0},
+	})
 	if err != nil {
 		t.Fatalf("ListByTenant() failed: %v", err)
 	}
 	if len(result2.Items) != 1 {
 		t.Fatalf("tenant-2: expected 1 connector, got %d", len(result2.Items))
+	}
+}
+
+func TestListConnectors_FilterByType(t *testing.T) {
+	svc, _, _, _ := setupConnectorService()
+
+	httpType := domain.ConnectorTypeHTTPClient
+	smppType := domain.ConnectorTypeSMPPClient
+
+	_, _ = svc.Create(context.Background(), domain.CreateConnectorInput{
+		TenantID: "tenant-1", Type: httpType, Name: "HTTP-1",
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+	_, _ = svc.Create(context.Background(), domain.CreateConnectorInput{
+		TenantID: "tenant-1", Type: httpType, Name: "HTTP-2",
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+	_, _ = svc.Create(context.Background(), domain.CreateConnectorInput{
+		TenantID: "tenant-1", Type: smppType, Name: "SMPP-1",
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+
+	result, err := svc.ListByTenant(context.Background(), domain.ConnectorFilter{
+		TenantID: "tenant-1",
+		Type:     &httpType,
+		Page:     domain.Page{Limit: 10, Offset: 0},
+	})
+	if err != nil {
+		t.Fatalf("ListByTenant() failed: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("expected 2 HTTP connectors, got %d", len(result.Items))
+	}
+}
+
+func TestListConnectors_FilterByStatus(t *testing.T) {
+	svc, _, _, _ := setupConnectorService()
+
+	disabled := domain.ConnectorStatusDisabled
+
+	_, _ = svc.Create(context.Background(), domain.CreateConnectorInput{
+		TenantID: "tenant-1", Type: domain.ConnectorTypeHTTPClient, Name: "Active",
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+	_, _ = svc.Create(context.Background(), domain.CreateConnectorInput{
+		TenantID: "tenant-1", Type: domain.ConnectorTypeHTTPClient, Name: "Disabled",
+		Status: &disabled,
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+
+	result, err := svc.ListByTenant(context.Background(), domain.ConnectorFilter{
+		TenantID: "tenant-1",
+		Status:   &disabled,
+		Page:     domain.Page{Limit: 10, Offset: 0},
+	})
+	if err != nil {
+		t.Fatalf("ListByTenant() failed: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 disabled connector, got %d", len(result.Items))
+	}
+	if result.Items[0].Name != "Disabled" {
+		t.Fatalf("expected 'Disabled', got '%s'", result.Items[0].Name)
 	}
 }
 
@@ -380,5 +477,29 @@ func TestTestConnector_NotFound(t *testing.T) {
 	err := svc.TestConnector(context.Background(), "nonexistent", uuid.New().String(), "127.0.0.1")
 	if err != domain.ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestTestConnector_MockTester(t *testing.T) {
+	repo := newMockConnectorRepo()
+	auditRepo := &mockAuditRepo{}
+	bus := event.NewMemoryBus()
+	clock := &mockClock{now: time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)}
+	txManager := &mockTxManager{}
+
+	svc := NewConnectorService(repo, auditRepo, txManager, bus, clock, NewMockConnectorTester())
+
+	created, err := svc.Create(context.Background(), domain.CreateConnectorInput{
+		TenantID: "tenant-1",
+		Type:     domain.ConnectorTypeMock,
+		Name:     "Mock Connector",
+	}, "user-1", uuid.New().String(), "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+
+	err = svc.TestConnector(context.Background(), created.ID, uuid.New().String(), "127.0.0.1")
+	if err != nil {
+		t.Fatalf("TestConnector() with mock tester failed: %v", err)
 	}
 }

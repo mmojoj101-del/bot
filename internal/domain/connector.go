@@ -1,5 +1,7 @@
 package domain
 
+import "context"
+
 // Connector represents a protocol connector (SMPP, HTTP, SIP) configuration.
 type Connector struct {
 	BaseModel
@@ -8,7 +10,6 @@ type Connector struct {
 	Name      string           `json:"name"`
 	Status    ConnectorStatus  `json:"status"`
 	Config    []byte           `json:"config"` // JSONB - protocol-specific config
-	Enabled   bool             `json:"enabled"`
 	CreatedBy string           `json:"created_by,omitempty"`
 	UpdatedBy string           `json:"updated_by,omitempty"`
 }
@@ -28,5 +29,34 @@ type UpdateConnectorInput struct {
 	Type    *ConnectorType    `json:"type,omitempty"`
 	Status  *ConnectorStatus  `json:"status,omitempty"`
 	Config  []byte            `json:"config,omitempty"`
-	Enabled *bool             `json:"enabled,omitempty"`
+}
+
+// ConnectorStatus represents the operational status of a connector.
+// The single source of truth — combines enablement and health.
+//   active    → enabled and healthy
+//   disabled  → administratively disabled
+//   testing   → connection test in progress
+//   error     → enabled but in an error state
+type ConnectorStatus string
+
+const (
+	ConnectorStatusActive   ConnectorStatus = "active"
+	ConnectorStatusDisabled ConnectorStatus = "disabled"
+	ConnectorStatusTesting  ConnectorStatus = "testing"
+	ConnectorStatusError    ConnectorStatus = "error"
+)
+
+// ConnectorFilter represents filtering options for listing connectors.
+type ConnectorFilter struct {
+	TenantID string
+	Type     *ConnectorType
+	Status   *ConnectorStatus
+	Search   string
+	Page     Page
+}
+
+// ConnectorTester tests a connector's connection.
+type ConnectorTester interface {
+	Test(ctx context.Context, connector *Connector) error
+	Type() ConnectorType
 }

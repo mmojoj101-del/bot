@@ -81,7 +81,7 @@ func (h *ConnectorHandler) Delete(c *fiber.Ctx) error {
 	return NoContent(c)
 }
 
-// ListByTenant lists connectors for the current tenant.
+// ListByTenant lists connectors for the current tenant with optional filtering.
 func (h *ConnectorHandler) ListByTenant(c *fiber.Ctx) error {
 	tenantID := c.Locals("tenant_id").(string)
 	limit, _ := strconv.Atoi(c.Query("limit", "20"))
@@ -94,7 +94,27 @@ func (h *ConnectorHandler) ListByTenant(c *fiber.Ctx) error {
 		offset = 0
 	}
 
-	result, err := h.connectorService.ListByTenant(c.Context(), tenantID, domain.Page{Limit: limit, Offset: offset})
+	var typeFilter *domain.ConnectorType
+	if t := c.Query("type"); t != "" {
+		ct := domain.ConnectorType(t)
+		typeFilter = &ct
+	}
+
+	var statusFilter *domain.ConnectorStatus
+	if s := c.Query("status"); s != "" {
+		cs := domain.ConnectorStatus(s)
+		statusFilter = &cs
+	}
+
+	filter := domain.ConnectorFilter{
+		TenantID: tenantID,
+		Type:     typeFilter,
+		Status:   statusFilter,
+		Search:   c.Query("search"),
+		Page:     domain.Page{Limit: limit, Offset: offset},
+	}
+
+	result, err := h.connectorService.ListByTenant(c.Context(), filter)
 	if err != nil {
 		return Error(c, err)
 	}
