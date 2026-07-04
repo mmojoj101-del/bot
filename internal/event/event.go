@@ -33,6 +33,8 @@ const (
 	EventAPIKeyUsed         = "api_key.used"
 	EventConnectorCreated   = "connector.created"
 	EventConnectorUpdated   = "connector.updated"
+	EventConnectorDeleted   = "connector.deleted"
+	EventConnectorTested    = "connector.tested"
 	EventRouteCreated       = "route.created"
 	EventRouteUpdated       = "route.updated"
 	EventAuditLogged        = "audit.logged"

@@ -26,12 +26,16 @@ func (r *ConnectorRepository) Create(ctx context.Context, input domain.CreateCon
 	if config == nil {
 		config = []byte("{}")
 	}
+	status := domain.ConnectorStatusActive
+	if input.Status != nil {
+		status = *input.Status
+	}
 	err := q.QueryRow(ctx,
-		`INSERT INTO connectors (tenant_id, type, name, config, created_by, updated_by)
-		 VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-		 RETURNING id, tenant_id, type, name, config, enabled, created_by, updated_by, created_at, updated_at, version`,
-		input.TenantID, input.Type, input.Name, config, createdBy, createdBy,
-	).Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.Version)
+		`INSERT INTO connectors (tenant_id, type, name, status, config, created_by, updated_by)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+		 RETURNING id, tenant_id, type, name, status, config, enabled, created_by, updated_by, created_at, updated_at, version`,
+		input.TenantID, input.Type, input.Name, status, config, createdBy, createdBy,
+	).Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Status, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.Version)
 	if err != nil {
 		return nil, r.wrapError(err)
 	}
@@ -42,10 +46,10 @@ func (r *ConnectorRepository) GetByID(ctx context.Context, id string) (*domain.C
 	q := r.getQuerier(ctx)
 	c := &domain.Connector{}
 	err := q.QueryRow(ctx,
-		`SELECT id, tenant_id, type, name, config, enabled, created_by, updated_by, created_at, updated_at, deleted_at, version
+		`SELECT id, tenant_id, type, name, status, config, enabled, created_by, updated_by, created_at, updated_at, deleted_at, version
 		 FROM connectors WHERE id = $1 AND `+r.softDeleteClause(),
 		id,
-	).Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.DeletedAt, &c.Version)
+	).Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Status, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.DeletedAt, &c.Version)
 	if err == pgx.ErrNoRows {
 		return nil, domain.ErrNotFound
 	}
@@ -62,16 +66,17 @@ func (r *ConnectorRepository) Update(ctx context.Context, id string, input domai
 		`UPDATE connectors SET
 			name = COALESCE($1, name),
 			type = COALESCE($2, type),
-			config = CASE WHEN $3::jsonb IS NOT NULL THEN $3::jsonb ELSE config END,
-			enabled = COALESCE($4, enabled),
-			updated_by = $5,
-			updated_at = $6,
+			status = COALESCE($3, status),
+			config = CASE WHEN $4::jsonb IS NOT NULL THEN $4::jsonb ELSE config END,
+			enabled = COALESCE($5, enabled),
+			updated_by = $6,
+			updated_at = $7,
 			version = version + 1
-		 WHERE id = $7 AND version = $8 AND `+r.softDeleteClause()+`
-		 RETURNING id, tenant_id, type, name, config, enabled, created_by, updated_by, created_at, updated_at, version`,
-		nullableString(input.Name), (*string)(input.Type), input.Config, input.Enabled,
-		updatedBy, time.Now().UTC(), id, version,
-	).Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.Version)
+		 WHERE id = $8 AND version = $9 AND `+r.softDeleteClause()+`
+		 RETURNING id, tenant_id, type, name, status, config, enabled, created_by, updated_by, created_at, updated_at, version`,
+		nullableString(input.Name), (*string)(input.Type), (*string)(input.Status),
+		input.Config, input.Enabled, updatedBy, time.Now().UTC(), id, version,
+	).Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Status, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.Version)
 	if err == pgx.ErrNoRows {
 		if _, err2 := r.GetByID(ctx, id); err2 != nil {
 			return nil, domain.ErrNotFound
@@ -102,7 +107,7 @@ func (r *ConnectorRepository) Delete(ctx context.Context, id string) error {
 func (r *ConnectorRepository) ListByTenant(ctx context.Context, tenantID string, page domain.Page) (domain.PageResult[domain.Connector], error) {
 	q := r.getQuerier(ctx)
 	rows, err := q.Query(ctx,
-		`SELECT id, tenant_id, type, name, config, enabled, created_by, updated_by, created_at, updated_at, deleted_at, version
+		`SELECT id, tenant_id, type, name, status, config, enabled, created_by, updated_by, created_at, updated_at, deleted_at, version
 		 FROM connectors WHERE tenant_id = $1 AND `+r.softDeleteClause()+`
 		 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
 		tenantID, page.Limit, page.Offset,
@@ -115,7 +120,7 @@ func (r *ConnectorRepository) ListByTenant(ctx context.Context, tenantID string,
 	var connectors []domain.Connector
 	for rows.Next() {
 		var c domain.Connector
-		if err := rows.Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.DeletedAt, &c.Version); err != nil {
+		if err := rows.Scan(&c.ID, &c.TenantID, &c.Type, &c.Name, &c.Status, &c.Config, &c.Enabled, &c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.DeletedAt, &c.Version); err != nil {
 			return domain.PageResult[domain.Connector]{}, err
 		}
 		connectors = append(connectors, c)

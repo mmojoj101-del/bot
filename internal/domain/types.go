@@ -48,6 +48,17 @@ const (
 	ConnectorTypeHTTPServer ConnectorType = "http_server"
 	ConnectorTypeSIPClient  ConnectorType = "sip_client"
 	ConnectorTypeSIPServer  ConnectorType = "sip_server"
+	ConnectorTypeMock       ConnectorType = "mock"
+)
+
+// ConnectorStatus represents the operational status of a connector.
+type ConnectorStatus string
+
+const (
+	ConnectorStatusActive   ConnectorStatus = "active"
+	ConnectorStatusDisabled ConnectorStatus = "disabled"
+	ConnectorStatusTesting  ConnectorStatus = "testing"
+	ConnectorStatusError    ConnectorStatus = "error"
 )
 
 // RouteType represents the type of a route.
@@ -62,11 +73,12 @@ const (
 type AuditAction string
 
 const (
-	AuditActionCreate      AuditAction = "create"
-	AuditActionUpdate      AuditAction = "update"
-	AuditActionDelete      AuditAction = "delete"
-	AuditActionLogin       AuditAction = "login"
-	AuditActionLogout      AuditAction = "logout"
-	AuditActionSwitchTenant AuditAction = "switch_tenant"
-	AuditActionAPIKeyAuth  AuditAction = "api_key_auth"
+	AuditActionCreate          AuditAction = "create"
+	AuditActionUpdate          AuditAction = "update"
+	AuditActionDelete          AuditAction = "delete"
+	AuditActionLogin           AuditAction = "login"
+	AuditActionLogout          AuditAction = "logout"
+	AuditActionSwitchTenant    AuditAction = "switch_tenant"
+	AuditActionAPIKeyAuth      AuditAction = "api_key_auth"
+	AuditActionConnectorTested AuditAction = "connector_tested"
 )

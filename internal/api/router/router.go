@@ -38,8 +38,8 @@ func New(
 	tenantRepo := pgrepo.NewTenantRepository(db)
 	memberRepo := pgrepo.NewTenantMemberRepository(db)
 	apiKeyRepo := pgrepo.NewAPIKeyRepository(db)
-	_ = pgrepo.NewConnectorRepository(db)  // will be used in Phase 2+
-	_ = pgrepo.NewRouteRepository(db)      // will be used in Phase 2+
+	connectorRepo := pgrepo.NewConnectorRepository(db)
+	_ = pgrepo.NewRouteRepository(db)      // will be used in Phase 2.2+
 	auditRepo := pgrepo.NewAuditLogRepository(db)
 	refreshTokenRepo := pgrepo.NewRefreshTokenRepository(db)
 
@@ -53,6 +53,7 @@ func New(
 	tenantService := service.NewTenantService(tenantRepo, memberRepo, auditRepo, eventBus, clock)
 	memberService := service.NewMemberService(memberRepo, auditRepo, eventBus, clock)
 	apiKeyService := service.NewAPIKeyService(apiKeyRepo, auditRepo, eventBus, cfg.JWT.Secret, clock)
+	connectorService := service.NewConnectorService(connectorRepo, auditRepo, eventBus, clock)
 	auditService := service.NewAuditService(auditRepo)
 
 	// ============================================================
@@ -63,6 +64,7 @@ func New(
 	tenantHandler := handler.NewTenantHandler(tenantService)
 	memberHandler := handler.NewMemberHandler(memberService)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
+	connectorHandler := handler.NewConnectorHandler(connectorService)
 	auditHandler := handler.NewAuditHandler(auditService)
 
 	// ============================================================
@@ -131,6 +133,14 @@ func New(
 	protected.Get("/api-keys/:id", apiKeyHandler.GetByID)
 	protected.Put("/api-keys/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), apiKeyHandler.Update)
 	protected.Delete("/api-keys/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), apiKeyHandler.Delete)
+
+	// Connectors (tenant-scoped)
+	protected.Post("/connectors", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), connectorHandler.Create)
+	protected.Get("/connectors", connectorHandler.ListByTenant)
+	protected.Get("/connectors/:id", connectorHandler.GetByID)
+	protected.Put("/connectors/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), connectorHandler.Update)
+	protected.Delete("/connectors/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), connectorHandler.Delete)
+	protected.Post("/connectors/:id/test", rbacMiddleware.RequireRole(domain.MemberRoleAdmin, domain.MemberRoleOperator), connectorHandler.TestConnection)
 
 	// Audit logs
 	protected.Get("/audit-logs", auditHandler.ListByTenant)

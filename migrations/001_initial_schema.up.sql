@@ -120,6 +120,7 @@ CREATE TABLE connectors (
     tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     type        connector_type NOT NULL,
     name        VARCHAR(255) NOT NULL,
+    status      VARCHAR(20) NOT NULL DEFAULT 'active',
     config      JSONB NOT NULL DEFAULT '{}',
     enabled     BOOLEAN NOT NULL DEFAULT TRUE,
     created_by  UUID REFERENCES users(id) ON DELETE SET NULL,
