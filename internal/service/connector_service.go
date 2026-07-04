@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/google/uuid"
 	"github.com/raghna/fury-sms-gateway/internal/domain"
@@ -44,6 +45,11 @@ func NewConnectorService(
 
 // Create creates a new connector.
 func (s *ConnectorService) Create(ctx context.Context, input domain.CreateConnectorInput, createdBy, requestID, ipAddress string) (*domain.Connector, error) {
+	// Block mock type in production environments
+	if input.Type == domain.ConnectorTypeMock && isProductionEnv() {
+		return nil, domain.ErrConnectorTypeNotAllowed
+	}
+
 	var connector *domain.Connector
 
 	err := s.txManager.WithinTransaction(ctx, func(txCtx context.Context) error {
@@ -243,3 +249,8 @@ func (s *ConnectorService) logAudit(ctx context.Context, tenantID, userID *strin
 }
 
 var statusTesting = domain.ConnectorStatusTesting
+
+// isProductionEnv returns true if the application is running in production mode.
+func isProductionEnv() bool {
+	return os.Getenv("APP_ENV") == "production"
+}

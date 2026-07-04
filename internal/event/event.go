@@ -37,5 +37,6 @@ const (
 	EventConnectorTested    = "connector.tested"
 	EventRouteCreated       = "route.created"
 	EventRouteUpdated       = "route.updated"
+	EventRouteDeleted       = "route.deleted"
 	EventAuditLogged        = "audit.logged"
 )

@@ -29,6 +29,9 @@ var (
 
 	// ErrRateLimited is returned when rate limit is exceeded.
 	ErrRateLimited = errors.New("rate limit exceeded")
+
+	// ErrConnectorTypeNotAllowed is returned when a connector type is not allowed.
+	ErrConnectorTypeNotAllowed = errors.New("connector type not allowed in this environment")
 )
 
 // ValidationError represents a validation error with field-level details.

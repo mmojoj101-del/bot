@@ -70,7 +70,7 @@ type RouteRepository interface {
 	GetByID(ctx context.Context, id string) (*Route, error)
 	Update(ctx context.Context, id string, input UpdateRouteInput, updatedBy string, version int) (*Route, error)
 	Delete(ctx context.Context, id string) error
-	ListByTenant(ctx context.Context, tenantID string, page Page) (PageResult[Route], error)
+	ListByTenant(ctx context.Context, filter RouteFilter) (PageResult[Route], error)
 	ListByTenantAndType(ctx context.Context, tenantID string, routeType RouteType) ([]Route, error)
 	CountByTenant(ctx context.Context, tenantID string) (int64, error)
 }

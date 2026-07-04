@@ -139,10 +139,15 @@ CREATE INDEX idx_connectors_type ON connectors(type);
 -- ROUTES
 -- ============================================================
 
+CREATE TYPE route_strategy AS ENUM ('static', 'round_robin', 'failover', 'weighted');
+
 CREATE TABLE routes (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name          VARCHAR(255) NOT NULL,
     type          route_type NOT NULL DEFAULT 'sms',
+    strategy      route_strategy NOT NULL DEFAULT 'static',
+    weight        INTEGER NOT NULL DEFAULT 1,
     priority      INTEGER NOT NULL DEFAULT 0,
     prefix        VARCHAR(50) NOT NULL,
     connector_id  UUID NOT NULL REFERENCES connectors(id) ON DELETE CASCADE,
@@ -155,7 +160,7 @@ CREATE TABLE routes (
     version       INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE INDEX idx_routes_tenant_prefix ON routes(tenant_id, prefix) WHERE deleted_at IS NULL;
+CREATE INDEX idx_routes_tenant_prefix ON routes(tenant_id, prefix, priority DESC) WHERE deleted_at IS NULL;
 CREATE INDEX idx_routes_connector ON routes(connector_id) WHERE deleted_at IS NULL;
 
 -- ============================================================

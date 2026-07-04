@@ -39,7 +39,7 @@ func New(
 	memberRepo := pgrepo.NewTenantMemberRepository(db)
 	apiKeyRepo := pgrepo.NewAPIKeyRepository(db)
 	connectorRepo := pgrepo.NewConnectorRepository(db)
-	_ = pgrepo.NewRouteRepository(db)      // will be used in Phase 2.2+
+	routeRepo := pgrepo.NewRouteRepository(db)
 	auditRepo := pgrepo.NewAuditLogRepository(db)
 	refreshTokenRepo := pgrepo.NewRefreshTokenRepository(db)
 	txManager := pgrepo.NewTxManager(db)
@@ -55,6 +55,7 @@ func New(
 	memberService := service.NewMemberService(memberRepo, auditRepo, eventBus, clock)
 	apiKeyService := service.NewAPIKeyService(apiKeyRepo, auditRepo, eventBus, cfg.JWT.Secret, clock)
 	connectorService := service.NewConnectorService(connectorRepo, auditRepo, txManager, eventBus, clock)
+	routeService := service.NewRouteService(routeRepo, connectorRepo, auditRepo, txManager, eventBus, clock)
 	auditService := service.NewAuditService(auditRepo)
 
 	// ============================================================
@@ -66,6 +67,7 @@ func New(
 	memberHandler := handler.NewMemberHandler(memberService)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	connectorHandler := handler.NewConnectorHandler(connectorService)
+	routeHandler := handler.NewRouteHandler(routeService)
 	auditHandler := handler.NewAuditHandler(auditService)
 
 	// ============================================================
@@ -142,6 +144,13 @@ func New(
 	protected.Put("/connectors/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), connectorHandler.Update)
 	protected.Delete("/connectors/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), connectorHandler.Delete)
 	protected.Post("/connectors/:id/test", rbacMiddleware.RequireRole(domain.MemberRoleAdmin, domain.MemberRoleOperator), connectorHandler.TestConnection)
+
+	// Routes (tenant-scoped)
+	protected.Post("/routes", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), routeHandler.Create)
+	protected.Get("/routes", routeHandler.ListByTenant)
+	protected.Get("/routes/:id", routeHandler.GetByID)
+	protected.Put("/routes/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), routeHandler.Update)
+	protected.Delete("/routes/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), routeHandler.Delete)
 
 	// Audit logs
 	protected.Get("/audit-logs", auditHandler.ListByTenant)
