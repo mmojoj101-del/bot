@@ -1,0 +1,158 @@
+package router
+
+import (
+	"log/slog"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+	"github.com/raghna/fury-sms-gateway/internal/api/handler"
+	"github.com/raghna/fury-sms-gateway/internal/api/middleware"
+	"github.com/raghna/fury-sms-gateway/internal/config"
+	"github.com/raghna/fury-sms-gateway/internal/domain"
+	"github.com/raghna/fury-sms-gateway/internal/event"
+	pgrepo "github.com/raghna/fury-sms-gateway/internal/repository/postgres"
+	"github.com/raghna/fury-sms-gateway/internal/service"
+)
+
+// New creates and configures a new Fiber application with all routes.
+func New(
+	cfg *config.Config,
+	db *pgxpool.Pool,
+	rdb *redis.Client,
+	eventBus event.Bus,
+	clock domain.Clock,
+	migratedFn func() bool,
+) (*fiber.App, error) {
+	app := fiber.New(fiber.Config{
+		ReadTimeout:  cfg.HTTP.ReadTimeout,
+		WriteTimeout: cfg.HTTP.WriteTimeout,
+		AppName:      cfg.App.Name,
+	})
+
+	// ============================================================
+	// Initialize repositories
+	// ============================================================
+	userRepo := pgrepo.NewUserRepository(db)
+	tenantRepo := pgrepo.NewTenantRepository(db)
+	memberRepo := pgrepo.NewTenantMemberRepository(db)
+	apiKeyRepo := pgrepo.NewAPIKeyRepository(db)
+	_ = pgrepo.NewConnectorRepository(db)  // will be used in Phase 2+
+	_ = pgrepo.NewRouteRepository(db)      // will be used in Phase 2+
+	auditRepo := pgrepo.NewAuditLogRepository(db)
+	refreshTokenRepo := pgrepo.NewRefreshTokenRepository(db)
+
+	// ============================================================
+	// Initialize services
+	// ============================================================
+	authService := service.NewAuthService(
+		userRepo, memberRepo, apiKeyRepo, refreshTokenRepo, auditRepo,
+		eventBus, &cfg.JWT, clock,
+	)
+	tenantService := service.NewTenantService(tenantRepo, memberRepo, auditRepo, eventBus, clock)
+	memberService := service.NewMemberService(memberRepo, auditRepo, eventBus, clock)
+	apiKeyService := service.NewAPIKeyService(apiKeyRepo, auditRepo, eventBus, cfg.JWT.Secret, clock)
+	auditService := service.NewAuditService(auditRepo)
+
+	// ============================================================
+	// Initialize handlers
+	// ============================================================
+	healthHandler := handler.NewHealthHandler(db, rdb, migratedFn)
+	authHandler := handler.NewAuthHandler(authService)
+	tenantHandler := handler.NewTenantHandler(tenantService)
+	memberHandler := handler.NewMemberHandler(memberService)
+	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
+	auditHandler := handler.NewAuditHandler(auditService)
+
+	// ============================================================
+	// Initialize middleware
+	// ============================================================
+	rbacMiddleware := middleware.NewRBACMiddleware()
+
+	// ============================================================
+	// Global middleware
+	// ============================================================
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger())
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     joinStrings(cfg.CORS.AllowedOrigins),
+		AllowMethods:     joinStrings(cfg.CORS.AllowedMethods),
+		AllowHeaders:     joinStrings(cfg.CORS.AllowedHeaders),
+		AllowCredentials: cfg.CORS.AllowCredentials,
+		MaxAge:           cfg.CORS.MaxAge,
+	}))
+	app.Use(middleware.TenantContext())
+	app.Use(middleware.MetricsMiddleware())
+
+	// ============================================================
+	// Health & Metrics (no auth required)
+	// ============================================================
+	app.Get("/health", healthHandler.Health)
+	app.Get("/ready", healthHandler.Readiness)
+	app.Get("/metrics", handler.MetricsHandler())
+
+	// ============================================================
+	// API v1 routes
+	// ============================================================
+	v1 := app.Group("/api/v1")
+
+	// Auth routes (no JWT required)
+	auth := v1.Group("/auth")
+	auth.Post("/login", authHandler.Login)
+	auth.Post("/refresh", authHandler.RefreshToken)
+	auth.Post("/logout", authHandler.Logout)
+
+	// Protected routes (JWT required)
+	protected := v1.Group("")
+	protected.Use(middleware.JWTAuth(cfg.JWT.Secret))
+
+	// User profile
+	protected.Get("/me", authHandler.Me)
+	protected.Post("/switch-tenant/:tenantID", authHandler.SwitchTenant)
+
+	// Tenant management (admin+ only)
+	protected.Post("/tenants", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), tenantHandler.Create)
+	protected.Get("/tenants", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), tenantHandler.List)
+	protected.Get("/tenants/:id", tenantHandler.GetByID)
+	protected.Put("/tenants/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), tenantHandler.Update)
+	protected.Delete("/tenants/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), tenantHandler.Delete)
+
+	// Tenant members
+	protected.Post("/tenants/:tenantID/members", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), memberHandler.Add)
+	protected.Get("/tenants/:tenantID/members", memberHandler.ListByTenant)
+	protected.Get("/tenants/:tenantID/members/:userID", memberHandler.UpdateRole)
+	protected.Put("/tenants/:tenantID/members/:userID", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), memberHandler.UpdateRole)
+	protected.Delete("/tenants/:tenantID/members/:userID", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), memberHandler.Remove)
+
+	// API Keys (tenant-scoped)
+	protected.Post("/api-keys", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), apiKeyHandler.Create)
+	protected.Get("/api-keys", apiKeyHandler.ListByTenant)
+	protected.Get("/api-keys/:id", apiKeyHandler.GetByID)
+	protected.Put("/api-keys/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), apiKeyHandler.Update)
+	protected.Delete("/api-keys/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), apiKeyHandler.Delete)
+
+	// Audit logs
+	protected.Get("/audit-logs", auditHandler.ListByTenant)
+	protected.Get("/audit-logs/me", auditHandler.ListByUser)
+
+	slog.Info("routes registered",
+		"health", "/health, /ready, /metrics",
+		"auth", "/api/v1/auth/*",
+		"protected", "/api/v1/tenants, /api/v1/api-keys, /api/v1/audit-logs",
+	)
+
+	return app, nil
+}
+
+// joinStrings joins a slice of strings with comma.
+func joinStrings(s []string) string {
+	result := ""
+	for i, v := range s {
+		if i > 0 {
+			result += ", "
+		}
+		result += v
+	}
+	return result
+}
