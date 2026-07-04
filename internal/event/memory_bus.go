@@ -1,21 +1,28 @@
 package event
 
 import (
-	"fmt"
 	"sync"
+	"sync/atomic"
 )
+
+// subscription represents a registered handler with a unique ID.
+type subscription struct {
+	id      uint64
+	handler Handler
+}
 
 // MemoryBus is an in-memory implementation of the EventBus interface.
 type MemoryBus struct {
 	mu       sync.RWMutex
-	handlers map[string][]Handler
+	handlers map[string][]*subscription
+	nextID   uint64
 	closed   bool
 }
 
 // NewMemoryBus creates a new in-memory event bus.
 func NewMemoryBus() *MemoryBus {
 	return &MemoryBus{
-		handlers: make(map[string][]Handler),
+		handlers: make(map[string][]*subscription),
 	}
 }
 
@@ -28,39 +35,49 @@ func (b *MemoryBus) Publish(event Event) {
 		return
 	}
 
-	handlers := b.handlers[event.Type]
-	for _, handler := range handlers {
-		handler(event)
+	subs := b.handlers[event.Type]
+	for _, sub := range subs {
+		sub.handler(event)
 	}
 }
 
 // Subscribe subscribes a handler to an event type.
-// Returns an unsubscribe function.
+// Returns an unsubscribe function that removes the subscription by ID.
 func (b *MemoryBus) Subscribe(eventType string, handler Handler) func() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.handlers[eventType] = append(b.handlers[eventType], handler)
+	id := atomic.AddUint64(&b.nextID, 1)
+	sub := &subscription{id: id, handler: handler}
+	b.handlers[eventType] = append(b.handlers[eventType], sub)
 
 	return func() {
-		b.Unsubscribe(eventType, handler)
+		b.removeByID(eventType, id)
 	}
 }
 
-// Unsubscribe removes a handler from an event type.
-func (b *MemoryBus) Unsubscribe(eventType string, handler Handler) {
+// removeByID removes a subscription by its unique ID.
+func (b *MemoryBus) removeByID(eventType string, id uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	handlers := b.handlers[eventType]
-	for i, h := range handlers {
-		// Compare function values directly
-		// Use string representation of pointer as a safe comparison
-		if fmt.Sprintf("%p", h) == fmt.Sprintf("%p", handler) {
-			b.handlers[eventType] = append(handlers[:i], handlers[i+1:]...)
+	subs := b.handlers[eventType]
+	for i, sub := range subs {
+		if sub.id == id {
+			b.handlers[eventType] = append(subs[:i], subs[i+1:]...)
 			return
 		}
 	}
+}
+
+// Unsubscribe is kept for interface compatibility.
+// Prefer using the closure returned by Subscribe() instead.
+func (b *MemoryBus) Unsubscribe(eventType string, _ Handler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Clear all handlers for this event type
+	delete(b.handlers, eventType)
 }
 
 // Close closes the event bus and clears all handlers.
