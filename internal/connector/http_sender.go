@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -15,12 +16,25 @@ import (
 )
 
 // HTTPSender implements domain.Sender for HTTP-based connectors.
+// Uses a singleton http.Client with connection pooling and caches parsed templates.
 type HTTPSender struct {
 	connectorType domain.ConnectorType
+	client        *http.Client
+	tmplCache     sync.Map // map[templateString]*template.Template
 }
 
 func NewHTTPSender() *HTTPSender {
-	return &HTTPSender{connectorType: domain.ConnectorTypeHTTPClient}
+	return &HTTPSender{
+		connectorType: domain.ConnectorTypeHTTPClient,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
+	}
 }
 
 func (s *HTTPSender) Type() domain.ConnectorType {
@@ -38,19 +52,10 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		return nil, fmt.Errorf("parse connector config: %w", err)
 	}
 
-	// Build request body from template
+	// Build request body from cached template
 	body, err := s.buildBody(cfg.BodyTemplate, req.Message)
 	if err != nil {
 		return nil, fmt.Errorf("build request body: %w", err)
-	}
-
-	// Determine timeout
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = time.Duration(cfg.TimeoutSec) * time.Second
-	}
-	if timeout <= 0 {
-		timeout = 30 * time.Second
 	}
 
 	// Build HTTP request
@@ -84,9 +89,8 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		httpReq.Header.Set("X-API-Key", cfg.AuthToken)
 	}
 
-	// Send
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(httpReq)
+	// Send using the pooled client
+	resp, err := s.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("http send: %w", err)
 	}
@@ -106,11 +110,19 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		}
 	}
 	if len(cfg.SuccessCodes) == 0 {
-		// Default: accept 200/202
 		success = resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted
 	}
 
 	if !success {
+		// Check for Retry-After header
+		retryAfter := resp.Header.Get("Retry-After")
+		if retryAfter != "" {
+			return nil, &ProviderRetryRequiredError{
+				StatusCode: resp.StatusCode,
+				RetryAfter: retryAfter,
+				Body:       truncateString(string(respBody), 200),
+			}
+		}
 		return nil, fmt.Errorf("provider returned status %d: %s", resp.StatusCode, truncateString(string(respBody), 200))
 	}
 
@@ -118,7 +130,7 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 	externalID := extractField(respBody, cfg.ExternalIDPath)
 	providerStatus := extractField(respBody, cfg.StatusPath)
 
-	// Calculate price/cost (approximated by parts)
+	// Calculate parts
 	parts := countSMSParts(req.Message.Text, req.Message.Encoding)
 	price := int64(parts) * 5000 // placeholder: 0.05 per part, override in production
 
@@ -126,15 +138,15 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		ExternalID:     externalID,
 		Parts:          parts,
 		Price:          price,
-		Cost:           price, // simplified: cost = price for now
+		Cost:           price,
 		RawResponse:    respBody,
 		ProviderStatus: providerStatus,
 	}, nil
 }
 
+// buildBody uses a cached template to avoid re-parsing on every send.
 func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message) ([]byte, error) {
 	if tmpl == "" {
-		// Default JSON body
 		return json.Marshal(map[string]interface{}{
 			"source":      msg.Source,
 			"destination": msg.Destination,
@@ -144,9 +156,15 @@ func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message) ([]byte, error)
 		})
 	}
 
-	t, err := template.New("body").Parse(tmpl)
-	if err != nil {
-		return nil, fmt.Errorf("parse template: %w", err)
+	// Cache the parsed template
+	t, ok := s.tmplCache.Load(tmpl)
+	if !ok {
+		parsed, err := template.New("body").Parse(tmpl)
+		if err != nil {
+			return nil, fmt.Errorf("parse template: %w", err)
+		}
+		t = parsed
+		s.tmplCache.Store(tmpl, parsed)
 	}
 
 	data := map[string]interface{}{
@@ -161,16 +179,26 @@ func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message) ([]byte, error)
 	}
 
 	var buf bytes.Buffer
-	if err := t.Execute(&buf, data); err != nil {
+	if err := t.(*template.Template).Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("execute template: %w", err)
 	}
 	return buf.Bytes(), nil
 }
 
+// ProviderRetryRequiredError indicates the provider asked us to retry after a delay.
+type ProviderRetryRequiredError struct {
+	StatusCode int
+	RetryAfter string // seconds or HTTP-date
+	Body       string
+}
+
+func (e *ProviderRetryRequiredError) Error() string {
+	return fmt.Sprintf("provider %d: retry after %s", e.StatusCode, e.RetryAfter)
+}
+
 // parseHTTPConfig unmarshals the connector config JSONB.
 func parseHTTPConfig(data []byte) (*domain.HTTPConnectorConfig, error) {
 	if len(data) == 0 {
-		// Return defaults
 		return &domain.HTTPConnectorConfig{
 			Method:       "POST",
 			ContentType:  "application/json",
@@ -194,8 +222,7 @@ func parseHTTPConfig(data []byte) (*domain.HTTPConnectorConfig, error) {
 	return &cfg, nil
 }
 
-// extractField extracts a field from a JSON response using a simple path.
-// Supports simple dot-notation paths: "data.id" or "message_id".
+// extractField extracts a field from a JSON response using dot-notation path.
 func extractField(body []byte, path string) string {
 	if path == "" || len(body) == 0 {
 		return ""
@@ -231,28 +258,22 @@ func extractField(body []byte, path string) string {
 }
 
 // countSMSParts estimates the number of SMS parts for a message.
-// GSM-7: 160 chars/part (153 for concatenated)
-// UCS-2: 70 chars/part (67 for concatenated)
 func countSMSParts(text string, encoding domain.Encoding) int {
 	if len(text) == 0 {
 		return 1
 	}
 
-	var maxPerPart, maxConcat int
+	maxPerPart := 160
+	maxConcat := 153
 	if encoding == domain.EncodingUCS2 {
 		maxPerPart = 70
 		maxConcat = 67
-	} else {
-		maxPerPart = 160
-		maxConcat = 153
 	}
 
 	if len(text) <= maxPerPart {
 		return 1
 	}
-
-	parts := (len(text) + maxConcat - 1) / maxConcat
-	return parts
+	return (len(text) + maxConcat - 1) / maxConcat
 }
 
 func truncateString(s string, maxLen int) string {
@@ -262,5 +283,4 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// ensure interfaces are satisfied
 var _ domain.Sender = (*HTTPSender)(nil)

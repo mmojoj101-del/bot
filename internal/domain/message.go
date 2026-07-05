@@ -160,32 +160,31 @@ type MetricsRecorder interface {
 }
 
 // ============================================================
-// DESIGN NOTES (not yet implemented — for Phase 2.4)
+// Phase 2.5 Design Notes (production hardening)
 // ============================================================
 //
-// FOR UPDATE SKIP LOCKED — DESIGNED, NOT YET IMPLEMENTED:
-// When multiple workers pull messages from the queue, use:
-//   BEGIN;
-//   SELECT id FROM messages WHERE status = 'queued'
-//   ORDER BY created_at ASC LIMIT 100
-//   FOR UPDATE SKIP LOCKED;
-//   UPDATE messages SET status = 'sending', version = version + 1
-//   WHERE id = ANY($1);
-//   COMMIT;
-// This prevents two workers from picking the same message.
-// Will be implemented in the QueueWorker.
+// IMPLEMENTED in Phase 2.4:
+//   ✅ FOR UPDATE SKIP LOCKED in QueueRepository.ClaimQueued()
+//   ✅ Sender interface with SendRequest/SendResult
+//   ✅ QueueRepository (Claim/AckSent/AckFailed/ScheduleRetry)
+//   ✅ RetryEngine with exponential backoff + jitter
+//   ✅ OutboxWorker (batch publish)
+//   ✅ DLRHandler with idempotent version check
+//   ✅ Concurrent worker integration tests
+//   ✅ Singleton http.Client with connection pooling
+//   ✅ Template caching (sync.Map)
+//   ✅ Retry-After header detection (ProviderRetryRequiredError)
 //
-// Idempotency — DESIGNED, NOT YET FULLY IMPLEMENTED:
-//   - ClientRef:  Unique per tenant, set by the API caller. Blocks duplicate submissions.
-//                 UNIQUE partial index in DB + check in service: ✅ done.
-//   - ExternalID: Unique per connector (SMSC message ID). Set when message is sent.
-//                 Lookup method exists in repo, dedup not yet enforced in worker.
-//   - DLR:        DLR updates must be idempotent — if a DLR arrives twice,
-//                 UpdateStatus should check the current status and skip if terminal.
-//                 DLR dedup logic will be in the DLRHandler.
-//   - ClientRef check is done BEFORE create (GetByClientRef).
-//   - ExternalID is set AFTER successful send.
-//   - DLR dedup: check if message is already 'delivered' or 'failed' before updating.
+// DESIGNED for Phase 2.5:
+//   📝 Graceful shutdown — drain in-flight messages before stopping workers
+//   📝 Dead Letter Queue — after MaxRetries exceeded, move to dlq table
+//   📝 Rate Limiter — per-connector, token bucket or sliding window
+//   📝 Circuit Breaker — trip when provider returns 5xx repeatedly
+//   📝 LISTEN/NOTIFY or Redis Stream — replace polling with push
+//   📝 SMPP Sender — implement domain.Sender for SMPP protocol
+//   📝 Prometheus MetricsRecorder — replace NoopMetricsRecorder
+//   📝 Integration tests with real PostgreSQL + Docker
+//   📝 Load test: 100k messages with 10 concurrent workers
 
 // ============================================================
 // Architectural Separation: Message Queue vs Outbox Events

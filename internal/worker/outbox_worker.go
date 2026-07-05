@@ -10,13 +10,13 @@ import (
 	"github.com/raghna/fury-sms-gateway/internal/event"
 )
 
-// OutboxWorker reads outbox_events and publishes them to the event bus.
+// OutboxWorker reads outbox_events in batches and publishes them to the event bus.
 type OutboxWorker struct {
-	outboxRepo domain.OutboxRepository
-	eventBus   event.Bus
-	batchSize  int
+	outboxRepo   domain.OutboxRepository
+	eventBus     event.Bus
+	batchSize    int
 	pollInterval time.Duration
-	stopCh     chan struct{}
+	stopCh       chan struct{}
 }
 
 func NewOutboxWorker(
@@ -78,33 +78,47 @@ func (w *OutboxWorker) processBatch() {
 		return
 	}
 
+	if len(events) == 0 {
+		return
+	}
+
+	// Publish all events in batch (no individual release — mark all at once on success)
+	var publishedIDs []string
 	for _, evt := range events {
-		w.publishEvent(ctx, evt)
+		payload, err := unmarshalPayload(evt.Payload)
+		if err != nil {
+			slog.Error("unmarshal outbox payload", "event_id", evt.ID, "error", err)
+			if err := w.outboxRepo.MarkFailed(ctx, evt.ID, err.Error()); err != nil {
+				slog.Error("mark outbox event failed", "event_id", evt.ID, "error", err)
+			}
+			continue
+		}
+
+		w.eventBus.Publish(event.Event{
+			ID:        evt.ID,
+			Type:      evt.EventType,
+			Payload:   payload,
+			Timestamp: time.Now().UTC(),
+		})
+		publishedIDs = append(publishedIDs, evt.ID)
+	}
+
+	// Mark all as published
+	for _, id := range publishedIDs {
+		if err := w.outboxRepo.MarkPublished(ctx, id); err != nil {
+			slog.Error("mark outbox event published", "event_id", id, "error", err)
+		}
+	}
+
+	if len(publishedIDs) > 0 {
+		slog.Debug("outbox batch published", "count", len(publishedIDs))
 	}
 }
 
-func (w *OutboxWorker) publishEvent(ctx context.Context, evt domain.OutboxEvent) {
-	// Parse the payload
+func unmarshalPayload(data []byte) (interface{}, error) {
 	var payload interface{}
-	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		slog.Error("unmarshal outbox payload", "event_id", evt.ID, "error", err)
-		if err := w.outboxRepo.MarkFailed(ctx, evt.ID, err.Error()); err != nil {
-			slog.Error("mark outbox event failed", "event_id", evt.ID, "error", err)
-		}
-		return
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
 	}
-
-	// Publish to event bus
-	w.eventBus.Publish(event.Event{
-		ID:        evt.ID,
-		Type:      evt.EventType,
-		Payload:   payload,
-		Timestamp: time.Now().UTC(),
-	})
-
-	// Mark as published
-	if err := w.outboxRepo.MarkPublished(ctx, evt.ID); err != nil {
-		slog.Error("mark outbox event published", "event_id", evt.ID, "error", err)
-		return
-	}
+	return payload, nil
 }
