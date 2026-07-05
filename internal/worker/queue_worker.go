@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
@@ -21,7 +23,13 @@ type QueueWorker struct {
 	eventBus   eventPublisher
 	batchSize  int
 	pollInterval time.Duration
-	stopCh     chan struct{}
+
+	ctx     context.Context
+	cancel  context.CancelFunc // cancels in-flight operations on shutdown
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
+
+	running atomic.Bool
 }
 
 // eventPublisher is a subset of the event bus used by the worker.
@@ -40,6 +48,7 @@ func NewQueueWorker(
 	eventBus eventPublisher,
 	opts ...QueueWorkerOption,
 ) *QueueWorker {
+	ctx, cancel := context.WithCancel(context.Background())
 	w := &QueueWorker{
 		queueRepo:    queueRepo,
 		msgRepo:      msgRepo,
@@ -51,6 +60,8 @@ func NewQueueWorker(
 		batchSize:    100,
 		pollInterval: 1 * time.Second,
 		stopCh:       make(chan struct{}),
+		cancel:       cancel,
+		ctx:          ctx,
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -69,72 +80,90 @@ func WithPollInterval(d time.Duration) QueueWorkerOption {
 	return func(w *QueueWorker) { w.pollInterval = d }
 }
 
-// Start begins the worker loop in a goroutine with panic recovery.
+// Start begins the worker loop in a goroutine with panic recovery and auto-restart.
 func (w *QueueWorker) Start() {
+	w.running.Store(true)
+	w.wg.Add(1)
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("queue worker panic recovered", "panic", r)
+		defer w.wg.Done()
+		defer w.running.Store(false)
+		for {
+			if !w.iteration() {
+				return
 			}
-		}()
-		w.loop()
+		}
 	}()
 	slog.Info("queue worker started", "batch_size", w.batchSize, "poll_interval", w.pollInterval)
 }
 
+// iteration runs one poll cycle and returns false if we should stop.
+func (w *QueueWorker) iteration() bool {
+	// Panic recovery WITH auto-restart
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("queue worker panic recovered, restarting...", "panic", r)
+			time.Sleep(time.Second) // prevent tight restart loop
+		}
+	}()
+
+	select {
+	case <-w.stopCh:
+		slog.Info("queue worker stopped")
+		return false
+	default:
+		w.processBatch()
+		time.Sleep(w.pollInterval)
+		return true
+	}
+}
+
 // Stop signals the worker to shut down gracefully.
+// Cancels in-flight operations and waits for the goroutine to exit.
 func (w *QueueWorker) Stop() {
-	close(w.stopCh)
+	w.cancel()     // interrupt in-flight DB queries and HTTP sends
+	close(w.stopCh) // signal loop to stop
+	w.wg.Wait()     // wait for goroutine to exit
 }
 
 // IsHealthy returns nil if the worker is healthy.
 func (w *QueueWorker) IsHealthy() error {
+	if !w.running.Load() {
+		return fmt.Errorf("queue worker goroutine is not running")
+	}
 	select {
 	case <-w.stopCh:
-		return fmt.Errorf("queue worker stopped")
+		return fmt.Errorf("queue worker is stopped")
 	default:
 		return nil
 	}
 }
 
-func (w *QueueWorker) loop() {
-	for {
-		select {
-		case <-w.stopCh:
-			slog.Info("queue worker stopped")
-			return
-		default:
-			w.processBatch()
-			time.Sleep(w.pollInterval)
-		}
-	}
-}
-
 func (w *QueueWorker) processBatch() {
-	ctx := context.Background()
-
-	// Step 1: Claim queued messages (FOR UPDATE SKIP LOCKED inside)
-	messages, err := w.queueRepo.ClaimQueued(ctx, w.batchSize)
+	// Use the worker's cancellable context so shutdown interrupts in-flight sends
+	messages, err := w.queueRepo.ClaimQueued(w.ctx, w.batchSize)
 	if err != nil {
 		slog.Error("claim queued messages", "error", err)
 		return
 	}
 
 	if len(messages) == 0 {
-		return // nothing to process
+		return
 	}
 
 	for _, msg := range messages {
-		w.processMessage(ctx, msg)
+		select {
+		case <-w.stopCh:
+			slog.Warn("shutting down, abandoning claimed messages", "count", len(messages))
+			return
+		default:
+		}
+		w.processMessage(w.ctx, msg)
 	}
 }
 
 func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 	logger := slog.With("message_id", msg.ID, "tenant_id", msg.TenantID)
 
-	// Step 2: Find the connector for this message
-	// For now, assume the route/connector resolution happens elsewhere.
-	// If no connector_id is set, skip (routing engine will handle it).
 	if msg.ConnectorID == nil || *msg.ConnectorID == "" {
 		logger.Warn("message has no connector, skipping")
 		return
@@ -147,7 +176,6 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 		return
 	}
 
-	// Step 3: Find the sender for this connector type
 	sender, ok := w.senders[connector.Type]
 	if !ok {
 		logger.Error("no sender registered", "connector_type", connector.Type)
@@ -155,7 +183,6 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 		return
 	}
 
-	// Step 4: Send the message
 	start := time.Now()
 	result, err := sender.Send(ctx, domain.SendRequest{
 		Message:   &msg,
@@ -167,9 +194,7 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 	if err != nil {
 		logger.Warn("send failed", "error", err, "retry_count", msg.RetryCount, "max_retries", msg.MaxRetries)
 
-		// Check if we should retry
 		if msg.RetryCount < msg.MaxRetries {
-			// Schedule retry with backoff
 			if err := w.queueRepo.ScheduleRetry(ctx, msg.ID, int(msg.Version), "SEND_FAILED", err.Error()); err != nil {
 				logger.Error("schedule retry", "error", err)
 			} else {
@@ -187,9 +212,7 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 		return
 	}
 
-	// Step 5: Mark as sent
-	version := msg.Version
-	if err := w.queueRepo.AckSent(ctx, msg.ID, int(version), result.ExternalID, result.Parts, result.Price, result.Cost); err != nil {
+	if err := w.queueRepo.AckSent(ctx, msg.ID, int(msg.Version), result.ExternalID, result.Parts, result.Price, result.Cost); err != nil {
 		logger.Error("ack sent", "error", err)
 		return
 	}

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
@@ -14,8 +16,8 @@ import (
 // DefaultRetryPolicy implements exponential backoff with jitter.
 // Delays: 5s, 30s, 2m, 10m, 30m (or until MaxRetries reached).
 type DefaultRetryPolicy struct {
-	baseDelay time.Duration
-	maxDelay  time.Duration
+	baseDelay  time.Duration
+	maxDelay   time.Duration
 	maxRetries int
 }
 
@@ -35,7 +37,6 @@ func (p *DefaultRetryPolicy) NextDelay(attempt int) time.Duration {
 	if attempt <= 1 {
 		return p.baseDelay
 	}
-
 	exp := math.Pow(2, float64(attempt-1))
 	delay := time.Duration(float64(p.baseDelay) * exp)
 
@@ -52,14 +53,17 @@ func (p *DefaultRetryPolicy) NextDelay(attempt int) time.Duration {
 	return delay
 }
 
-// RetryEngine monitors messages in 'retrying' status and re-queues them
-// after the backoff delay has elapsed.
+// RetryEngine monitors messages in 'retrying' status and re-queues them.
 type RetryEngine struct {
 	queueRepo    domain.QueueRepository
 	retryPolicy  domain.RetryPolicy
 	batchSize    int
 	pollInterval time.Duration
-	stopCh       chan struct{}
+
+	stopCh chan struct{}
+	wg     sync.WaitGroup
+
+	running atomic.Bool
 }
 
 func NewRetryEngine(
@@ -91,48 +95,61 @@ func RetryEngineWithPollInterval(d time.Duration) RetryEngineOption {
 }
 
 func (e *RetryEngine) Start() {
+	e.running.Store(true)
+	e.wg.Add(1)
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("retry engine panic recovered", "panic", r)
+		defer e.wg.Done()
+		defer e.running.Store(false)
+		for {
+			if !e.iteration() {
+				return
 			}
-		}()
-		e.loop()
+		}
 	}()
 	slog.Info("retry engine started", "batch_size", e.batchSize, "poll_interval", e.pollInterval)
 }
 
+func (e *RetryEngine) iteration() bool {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("retry engine panic recovered, restarting...", "panic", r)
+			time.Sleep(time.Second)
+		}
+	}()
+
+	select {
+	case <-e.stopCh:
+		slog.Info("retry engine stopped")
+		return false
+	default:
+		e.processRetries()
+		time.Sleep(e.pollInterval)
+		return true
+	}
+}
+
 func (e *RetryEngine) Stop() {
 	close(e.stopCh)
+	e.wg.Wait()
 }
 
 func (e *RetryEngine) IsHealthy() error {
+	if !e.running.Load() {
+		return fmt.Errorf("retry engine goroutine is not running")
+	}
 	select {
 	case <-e.stopCh:
-		return fmt.Errorf("retry engine stopped")
+		return fmt.Errorf("retry engine is stopped")
 	default:
 		return nil
 	}
 }
 
-func (e *RetryEngine) loop() {
-	for {
-		select {
-		case <-e.stopCh:
-			slog.Info("retry engine stopped")
-			return
-		default:
-			e.processRetries()
-			time.Sleep(e.pollInterval)
-		}
-	}
-}
-
 func (e *RetryEngine) processRetries() {
-	ctx := context.Background()
-	now := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// For the first attempt, the minimum delay is baseDelay
+	now := time.Now().UTC()
 	minDelay := e.retryPolicy.NextDelay(1)
 
 	messages, err := e.queueRepo.GetRetryable(ctx, now, minDelay, e.batchSize)
@@ -142,16 +159,17 @@ func (e *RetryEngine) processRetries() {
 	}
 
 	for _, msg := range messages {
-		// Calculate the actual delay for this message's retry count
-		requiredDelay := e.retryPolicy.NextDelay(msg.RetryCount + 1)
-
-		// Check if enough time has passed since the message was updated
-		if msg.UpdatedAt.Add(requiredDelay).After(now) {
-			continue // not yet ready
+		select {
+		case <-e.stopCh:
+			return
+		default:
 		}
 
-		// Move back to 'sending' so the QueueWorker picks it up
-		// Use AckFailed with retry semantics
+		requiredDelay := e.retryPolicy.NextDelay(msg.RetryCount + 1)
+		if msg.UpdatedAt.Add(requiredDelay).After(now) {
+			continue
+		}
+
 		if err := e.queueRepo.AckFailed(ctx, msg.ID, int(msg.Version), "RETRY", "retrying after backoff"); err != nil {
 			slog.Error("move to sending for retry", "message_id", msg.ID, "error", err)
 			continue
