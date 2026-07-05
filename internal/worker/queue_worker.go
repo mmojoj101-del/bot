@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
+	"github.com/raghna/fury-sms-gateway/internal/event"
 )
 
 // QueueWorker pulls queued messages and sends them through the appropriate connector.
@@ -25,7 +26,7 @@ type QueueWorker struct {
 
 // eventPublisher is a subset of the event bus used by the worker.
 type eventPublisher interface {
-	Publish(event interface{})
+	Publish(event.Event)
 }
 
 // NewQueueWorker creates a new queue worker.
@@ -68,15 +69,32 @@ func WithPollInterval(d time.Duration) QueueWorkerOption {
 	return func(w *QueueWorker) { w.pollInterval = d }
 }
 
-// Start begins the worker loop in a goroutine.
+// Start begins the worker loop in a goroutine with panic recovery.
 func (w *QueueWorker) Start() {
-	go w.loop()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("queue worker panic recovered", "panic", r)
+			}
+		}()
+		w.loop()
+	}()
 	slog.Info("queue worker started", "batch_size", w.batchSize, "poll_interval", w.pollInterval)
 }
 
 // Stop signals the worker to shut down gracefully.
 func (w *QueueWorker) Stop() {
 	close(w.stopCh)
+}
+
+// IsHealthy returns nil if the worker is healthy.
+func (w *QueueWorker) IsHealthy() error {
+	select {
+	case <-w.stopCh:
+		return fmt.Errorf("queue worker stopped")
+	default:
+		return nil
+	}
 }
 
 func (w *QueueWorker) loop() {

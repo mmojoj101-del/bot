@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"math/rand"
@@ -90,12 +91,28 @@ func RetryEngineWithPollInterval(d time.Duration) RetryEngineOption {
 }
 
 func (e *RetryEngine) Start() {
-	go e.loop()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("retry engine panic recovered", "panic", r)
+			}
+		}()
+		e.loop()
+	}()
 	slog.Info("retry engine started", "batch_size", e.batchSize, "poll_interval", e.pollInterval)
 }
 
 func (e *RetryEngine) Stop() {
 	close(e.stopCh)
+}
+
+func (e *RetryEngine) IsHealthy() error {
+	select {
+	case <-e.stopCh:
+		return fmt.Errorf("retry engine stopped")
+	default:
+		return nil
+	}
 }
 
 func (e *RetryEngine) loop() {

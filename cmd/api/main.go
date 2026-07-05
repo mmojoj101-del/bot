@@ -6,12 +6,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/api/router"
 	"github.com/raghna/fury-sms-gateway/internal/config"
+	"github.com/raghna/fury-sms-gateway/internal/connector"
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 	"github.com/raghna/fury-sms-gateway/internal/event"
+	pgrepo "github.com/raghna/fury-sms-gateway/internal/repository/postgres"
+	"github.com/raghna/fury-sms-gateway/internal/worker"
 	"github.com/raghna/fury-sms-gateway/pkg/cache"
 	"github.com/raghna/fury-sms-gateway/pkg/database"
 )
@@ -73,16 +78,63 @@ func main() {
 	// Clock
 	clock := domain.RealClock{}
 
+	// Initialize worker dependencies
+	txManager := pgrepo.NewTxManager(db)
+	queueRepo := pgrepo.NewQueueRepository(db, txManager)
+	msgRepo := pgrepo.NewMessageRepository(db)
+	outboxRepo := pgrepo.NewOutboxRepository(db)
+
+	// Register senders
+	senders := map[domain.ConnectorType]domain.Sender{
+		connector.NewHTTPSender().Type(): connector.NewHTTPSender(),
+	}
+
+	// Retry policy
+	retryPolicy := worker.NewDefaultRetryPolicy()
+
+	// Create workers
+	qw := worker.NewQueueWorker(
+		queueRepo,
+		msgRepo,
+		nil, // connRepo — will need a connector repo here
+		senders,
+		retryPolicy,
+		nil, // metrics — use noop for now
+		eventBus,
+		worker.WithBatchSize(100),
+		worker.WithPollInterval(1*time.Second),
+	)
+
+	re := worker.NewRetryEngine(
+		queueRepo,
+		retryPolicy,
+		worker.RetryEngineWithBatchSize(100),
+		worker.RetryEngineWithPollInterval(5*time.Second),
+	)
+
+	ow := worker.NewOutboxWorker(
+		outboxRepo,
+		eventBus,
+		worker.OutboxWorkerWithBatchSize(100),
+		worker.OutboxWorkerWithPollInterval(500*time.Millisecond),
+	)
+
+	// Worker health check (passes to router for /ready endpoint)
+	workerHealth := func() bool {
+		return qw.IsHealthy() == nil && re.IsHealthy() == nil && ow.IsHealthy() == nil
+	}
+
 	// Create Fiber app
-	app, err := router.New(cfg, db, rdb, eventBus, clock, func() bool {
-		// Migrations check - for now assume migrations are applied
-		// In production, this should check the migration version
-		return true
-	})
+	app, err := router.New(cfg, db, rdb, eventBus, clock, workerHealth)
 	if err != nil {
 		slog.Error("failed to create router", "error", err)
 		os.Exit(1)
 	}
+
+	// Start workers in order: outbox → retry → queue
+	ow.Start()
+	re.Start()
+	qw.Start()
 
 	// Start server in a goroutine
 	addr := fmt.Sprintf("%s:%d", cfg.HTTP.Host, cfg.HTTP.Port)
@@ -103,28 +155,48 @@ func main() {
 	case <-ctx.Done():
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown (reverse order)
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.HTTP.GracefulTimeout)
 	defer shutdownCancel()
 
-	// 1. Stop HTTP server
-	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
-		slog.Error("HTTP server shutdown error", "error", err)
-	}
+	slog.Info("draining workers...")
 
-	// 2. Drain requests (already handled by ShutdownWithContext)
+	// 1. Stop HTTP server first — no new requests
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := app.ShutdownWithContext(shutdownCtx); err != nil {
+			slog.Error("HTTP server shutdown error", "error", err)
+		}
+	}()
 
-	// 3. Close event bus
+	// 2. Stop QueueWorker first — no new messages pulled
+	qw.Stop()
+	slog.Info("queue worker stopped")
+
+	// 3. Stop RetryEngine
+	re.Stop()
+	slog.Info("retry engine stopped")
+
+	// 4. Stop OutboxWorker — drain pending events
+	ow.Stop()
+	slog.Info("outbox worker stopped")
+
+	// 5. Wait for HTTP server to finish
+	wg.Wait()
+
+	// 6. Close event bus
 	eventBus.Close()
 
-	// 4. Close Redis
+	// 7. Close Redis
 	if rdb != nil {
 		if err := rdb.Close(); err != nil {
 			slog.Error("redis close error", "error", err)
 		}
 	}
 
-	// 5. Close PostgreSQL
+	// 8. Close PostgreSQL
 	db.Close()
 
 	slog.Info("server stopped gracefully")

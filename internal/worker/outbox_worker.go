@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -48,12 +49,28 @@ func OutboxWorkerWithPollInterval(d time.Duration) OutboxWorkerOption {
 }
 
 func (w *OutboxWorker) Start() {
-	go w.loop()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("outbox worker panic recovered", "panic", r)
+			}
+		}()
+		w.loop()
+	}()
 	slog.Info("outbox worker started", "batch_size", w.batchSize, "poll_interval", w.pollInterval)
 }
 
 func (w *OutboxWorker) Stop() {
 	close(w.stopCh)
+}
+
+func (w *OutboxWorker) IsHealthy() error {
+	select {
+	case <-w.stopCh:
+		return fmt.Errorf("outbox worker stopped")
+	default:
+		return nil
+	}
 }
 
 func (w *OutboxWorker) loop() {
