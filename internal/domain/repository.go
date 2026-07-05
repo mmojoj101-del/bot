@@ -91,6 +91,27 @@ type MessageRepository interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// QueueRepository defines the interface for the sending queue (worker operations).
+// Separated from MessageRepository to keep worker-critical operations focused.
+type QueueRepository interface {
+	// ClaimQueued pulls pending messages using FOR UPDATE SKIP LOCKED.
+	// Multiple workers can safely pull without duplicates.
+	ClaimQueued(ctx context.Context, limit int) ([]Message, error)
+
+	// AckSent marks a message as sent after successful transmission.
+	AckSent(ctx context.Context, id string, version int, externalID string, parts int, price, cost int64) error
+
+	// AckFailed marks a message as failed after a send error.
+	AckFailed(ctx context.Context, id string, version int, errorCode, errorMessage string) error
+
+	// ScheduleRetry moves a message to retrying status with error details.
+	// The backoff delay determines when GetRetryable will pick it up.
+	ScheduleRetry(ctx context.Context, id string, version int, errorCode, errorMessage string) error
+
+	// GetRetryable fetches messages whose backoff delay has elapsed.
+	GetRetryable(ctx context.Context, now time.Time, minDelay time.Duration, limit int) ([]Message, error)
+}
+
 // OutboxRepository defines the interface for outbox event persistence.
 type OutboxRepository interface {
 	Create(ctx context.Context, event *OutboxEvent) error

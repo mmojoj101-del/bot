@@ -116,12 +116,47 @@ type OutboxEvent struct {
 	PublishedAt *time.Time `json:"published_at,omitempty"`
 }
 
+// SendRequest carries all context needed for a connector to send a message.
+type SendRequest struct {
+	Message   *Message
+	Connector *Connector
+	Timeout   time.Duration
+}
+
+// SendResult carries the outcome of a send attempt.
+type SendResult struct {
+	ExternalID     string `json:"external_id"`
+	Parts          int    `json:"parts"`
+	Price          int64  `json:"price"`
+	Cost           int64  `json:"cost"`
+	RawResponse    []byte `json:"raw_response,omitempty"`
+	ProviderStatus string `json:"provider_status,omitempty"`
+}
+
 // Sender defines the interface for sending messages through a connector.
 type Sender interface {
-	// Send sends a message and returns the external ID, parts count, and error.
-	Send(ctx context.Context, msg *Message) (externalID string, parts int, err error)
-	// Type returns the connector type this sender handles.
 	Type() ConnectorType
+	Send(ctx context.Context, req SendRequest) (*SendResult, error)
+}
+
+// RetryPolicy defines the backoff strategy for message retries.
+type RetryPolicy interface {
+	MaxRetries() int
+	NextDelay(attempt int) time.Duration
+}
+
+// DLRMapper maps provider-specific delivery status to the internal DLRStatus.
+type DLRMapper interface {
+	MapProviderStatus(providerStatus string) (DLRStatus, MessageStatus)
+	ConnectorType() ConnectorType
+}
+
+// MetricsRecorder records operational metrics from workers and senders.
+type MetricsRecorder interface {
+	RecordMessageSent(tenantID, connectorID string, parts int, latency time.Duration)
+	RecordMessageFailed(tenantID, connectorID, errorCode string)
+	RecordDLRReceived(tenantID, status string)
+	RecordRetry(tenantID string, attempt int)
 }
 
 // ============================================================
