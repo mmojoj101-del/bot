@@ -120,37 +120,53 @@ func main() {
 	fmt.Println("✓ Bootstrap complete")
 }
 
-// runMigrations applies database migrations.
+// runMigrations applies all database migrations.
 func runMigrations(db *pgxpool.Pool, dsn string) error {
-	// Try to create pgcrypto extension first
 	_, err := db.Exec(context.Background(), `CREATE EXTENSION IF NOT EXISTS pgcrypto`)
 	if err != nil {
 		return fmt.Errorf("create extension: %w", err)
 	}
 
-	// Check if tables already exist
-	var tableCount int
-	err = db.QueryRow(context.Background(),
-		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'`,
-	).Scan(&tableCount)
-	if err != nil {
-		return fmt.Errorf("check tables: %w", err)
+	migrationFiles := []string{
+		"migrations/001_initial_schema.up.sql",
+		"migrations/002_messages.up.sql",
+		"migrations/003_outbox.up.sql",
 	}
 
-	if tableCount > 0 {
-		slog.Info("tables already exist, skipping migration", "count", tableCount)
-		return nil
-	}
+	for i, file := range migrationFiles {
+		// Check if this migration already applied by looking for its tables
+		if i == 1 {
+			var exists bool
+			err := db.QueryRow(context.Background(),
+				`SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'messages')`,
+			).Scan(&exists)
+			if err == nil && exists {
+				slog.Info("migration 002 already applied, skipping")
+				continue
+			}
+		}
+		if i == 2 {
+			var exists bool
+			err := db.QueryRow(context.Background(),
+				`SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'outbox_events')`,
+			).Scan(&exists)
+			if err == nil && exists {
+				slog.Info("migration 003 already applied, skipping")
+				continue
+			}
+		}
 
-	// Execute up migration directly
-	migration, err := os.ReadFile("migrations/001_initial_schema.up.sql")
-	if err != nil {
-		return fmt.Errorf("read migration file: %w", err)
-	}
+		migration, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("read migration file %s: %w", file, err)
+		}
 
-	_, err = db.Exec(context.Background(), string(migration))
-	if err != nil {
-		return fmt.Errorf("execute migration: %w", err)
+		_, err = db.Exec(context.Background(), string(migration))
+		if err != nil {
+			return fmt.Errorf("execute migration %s: %w", file, err)
+		}
+
+		slog.Info("migration applied", "file", file)
 	}
 
 	return nil

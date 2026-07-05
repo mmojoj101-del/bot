@@ -82,8 +82,10 @@ func (w *OutboxWorker) processBatch() {
 		return
 	}
 
-	// Publish all events in batch (no individual release — mark all at once on success)
-	var publishedIDs []string
+		// Publish then mark each event individually.
+	// If marking fails after a crash, the event will be re-published
+	// on restart (at-least-once delivery). Subscribers must be idempotent.
+	published := 0
 	for _, evt := range events {
 		payload, err := unmarshalPayload(evt.Payload)
 		if err != nil {
@@ -100,18 +102,17 @@ func (w *OutboxWorker) processBatch() {
 			Payload:   payload,
 			Timestamp: time.Now().UTC(),
 		})
-		publishedIDs = append(publishedIDs, evt.ID)
-	}
 
-	// Mark all as published
-	for _, id := range publishedIDs {
-		if err := w.outboxRepo.MarkPublished(ctx, id); err != nil {
-			slog.Error("mark outbox event published", "event_id", id, "error", err)
+		// Mark immediately so failed event doesn't block the rest
+		if err := w.outboxRepo.MarkPublished(ctx, evt.ID); err != nil {
+			// Logged but don't stop — event will be re-published next cycle
+			slog.Error("mark outbox event published", "event_id", evt.ID, "error", err)
 		}
+		published++
 	}
 
-	if len(publishedIDs) > 0 {
-		slog.Debug("outbox batch published", "count", len(publishedIDs))
+	if published > 0 {
+		slog.Debug("outbox batch published", "count", published)
 	}
 }
 
