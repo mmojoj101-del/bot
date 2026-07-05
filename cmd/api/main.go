@@ -122,10 +122,8 @@ func main() {
 		worker.OutboxWorkerWithPollInterval(500*time.Millisecond),
 	)
 
-	// Worker health check (passes to router for /ready endpoint)
-	workerHealth := func() bool {
-		return qw.IsHealthy() == nil && re.IsHealthy() == nil && ow.IsHealthy() == nil
-	}
+	// Worker health checker (aggregates all workers for /ready endpoint)
+	workerHealth := worker.NewHealthChecker(qw, re, ow)
 
 	// Create Fiber app
 	app, err := router.New(cfg, db, rdb, eventBus, clock, workerHealth)

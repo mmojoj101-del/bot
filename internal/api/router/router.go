@@ -24,7 +24,7 @@ func New(
 	rdb *redis.Client,
 	eventBus event.Bus,
 	clock domain.Clock,
-	migratedFn func() bool,
+	workers handler.WorkerHealthChecker,
 ) (*fiber.App, error) {
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
@@ -63,7 +63,7 @@ func New(
 	// ============================================================
 	// Initialize handlers
 	// ============================================================
-	healthHandler := handler.NewHealthHandler(db, rdb, migratedFn)
+	healthHandler := handler.NewHealthHandler(db, rdb, workers)
 	authHandler := handler.NewAuthHandler(authService)
 	tenantHandler := handler.NewTenantHandler(tenantService)
 	memberHandler := handler.NewMemberHandler(memberService)
