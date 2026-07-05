@@ -26,7 +26,6 @@ CREATE TABLE messages (
     client_id        VARCHAR(255) NOT NULL,
     direction        message_direction NOT NULL DEFAULT 'outbound',
     status           message_status NOT NULL DEFAULT 'accepted',
-    previous_status  message_status,
     source           VARCHAR(50) NOT NULL,
     destination      VARCHAR(50) NOT NULL,
     text             TEXT NOT NULL,
@@ -40,8 +39,8 @@ CREATE TABLE messages (
     client_ref       VARCHAR(255),
     retry_count      INTEGER NOT NULL DEFAULT 0,
     max_retries      INTEGER NOT NULL DEFAULT 3,
-    price            NUMERIC(12,4) NOT NULL DEFAULT 0,
-    cost             NUMERIC(12,4) NOT NULL DEFAULT 0,
+    price            BIGINT NOT NULL DEFAULT 0,
+    cost             BIGINT NOT NULL DEFAULT 0,
     sent_at          TIMESTAMPTZ,
     delivered_at     TIMESTAMPTZ,
     failed_at        TIMESTAMPTZ,
@@ -53,12 +52,13 @@ CREATE TABLE messages (
 );
 
 -- Indexes for efficient querying
-CREATE INDEX idx_messages_tenant_created ON messages(tenant_id, created_at DESC) WHERE deleted_at IS NULL;
-CREATE INDEX idx_messages_status ON messages(status) WHERE deleted_at IS NULL;
-CREATE INDEX idx_messages_connector ON messages(connector_id) WHERE deleted_at IS NULL;
-CREATE INDEX idx_messages_direction ON messages(tenant_id, direction) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX idx_messages_client_ref ON messages(tenant_id, client_ref) WHERE client_ref IS NOT NULL AND deleted_at IS NULL;
 CREATE INDEX idx_messages_external_id ON messages(external_id) WHERE external_id IS NOT NULL AND deleted_at IS NULL;
+-- Composite indexes for common query patterns
+CREATE INDEX idx_messages_tenant_status ON messages(tenant_id, status, created_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX idx_messages_tenant_connector ON messages(tenant_id, connector_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_messages_tenant_created ON messages(tenant_id, created_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX idx_messages_tenant_direction ON messages(tenant_id, direction, created_at DESC) WHERE deleted_at IS NULL;
 CREATE INDEX idx_messages_source_dest ON messages(tenant_id, source, destination) WHERE deleted_at IS NULL;
 
 -- ============================================================

@@ -8,28 +8,29 @@ import (
 // Message represents an SMS message in the system.
 type Message struct {
 	BaseModel
-	TenantID      string         `json:"tenant_id"`
-	ConnectorID   *string        `json:"connector_id,omitempty"`
-	RouteID       *string        `json:"route_id,omitempty"`
-	ClientID      string         `json:"client_id"` // API key ID or user ID
-	Direction     Direction      `json:"direction"`
-	Status        MessageStatus  `json:"status"`
-	PreviousStatus *MessageStatus `json:"previous_status,omitempty"` // for state machine tracking
-	Source        string         `json:"source"`       // sender ID / originator
-	Destination   string         `json:"destination"`  // recipient number
-	Text          string         `json:"text"`
-	Encoding      Encoding       `json:"encoding"`
-	Priority      MessagePriority `json:"priority"`
-	Parts         int            `json:"parts"` // number of SMS parts (concatenation)
-	DLRStatus     *DLRStatus     `json:"dlr_status,omitempty"`
-	DLRURL        string         `json:"dlr_url,omitempty"`    // delivery receipt callback URL
-	DLRID         string         `json:"dlr_id,omitempty"`     // external DLR ID
-	ExternalID    string         `json:"external_id,omitempty"` // SMSC message ID
-	ClientRef     string         `json:"client_ref,omitempty"`  // client-provided reference for idempotency
-	RetryCount    int            `json:"retry_count"`
-	MaxRetries    int            `json:"max_retries"`
-	Price         float64        `json:"price"`
-	Cost          float64        `json:"cost"`
+	TenantID    string          `json:"tenant_id"`
+	ConnectorID *string         `json:"connector_id,omitempty"`
+	RouteID     *string         `json:"route_id,omitempty"`
+	ClientID    string          `json:"client_id"` // API key ID or user ID
+	Direction   Direction       `json:"direction"`
+	Status      MessageStatus   `json:"status"`
+	Source      string          `json:"source"`       // sender ID / originator
+	Destination string          `json:"destination"`  // recipient number
+	Text        string          `json:"text"`
+	Encoding    Encoding        `json:"encoding"`
+	Priority    MessagePriority `json:"priority"`
+	Parts       int             `json:"parts"` // number of SMS parts (concatenation)
+	DLRStatus   *DLRStatus      `json:"dlr_status,omitempty"`
+	DLRURL      string          `json:"dlr_url,omitempty"`    // delivery receipt callback URL
+	DLRID       string          `json:"dlr_id,omitempty"`     // external DLR ID
+	ExternalID  string          `json:"external_id,omitempty"` // SMSC message ID
+	ClientRef   string          `json:"client_ref,omitempty"`  // client-provided reference for idempotency
+	RetryCount  int             `json:"retry_count"`
+	MaxRetries  int             `json:"max_retries"`
+	// Price/Cost stored as integer (thousandths of a cent = 1/100000 of a unit).
+	// Example: 0.05000 USD = 5000, display by dividing by 100000.
+	Price int64 `json:"price"`
+	Cost  int64 `json:"cost"`
 	SentAt        *time.Time     `json:"sent_at,omitempty"`
 	DeliveredAt   *time.Time     `json:"delivered_at,omitempty"`
 	FailedAt      *time.Time     `json:"failed_at,omitempty"`
@@ -63,8 +64,8 @@ type UpdateMessageInput struct {
 	ErrorCode   *string        `json:"error_code,omitempty"`
 	ErrorMessage *string       `json:"error_message,omitempty"`
 	Parts       *int           `json:"parts,omitempty"`
-	Price       *float64       `json:"price,omitempty"`
-	Cost        *float64       `json:"cost,omitempty"`
+	Price       *int64         `json:"price,omitempty"`
+	Cost        *int64         `json:"cost,omitempty"`
 	SentAt      *time.Time     `json:"sent_at,omitempty"`
 	DeliveredAt *time.Time     `json:"delivered_at,omitempty"`
 	FailedAt    *time.Time     `json:"failed_at,omitempty"`

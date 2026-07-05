@@ -62,14 +62,14 @@ func (r *MessageRepository) GetByID(ctx context.Context, id string) (*domain.Mes
 	q := r.getQuerier(ctx)
 	m := &domain.Message{}
 	err := q.QueryRow(ctx,
-		`SELECT id, tenant_id, connector_id, route_id, client_id, direction, status, previous_status,
+		`SELECT id, tenant_id, connector_id, route_id, client_id, direction, status,
 		        source, destination, text, encoding, priority, parts, dlr_status, dlr_url, dlr_id,
 		        external_id, client_ref, retry_count, max_retries, price, cost,
 		        sent_at, delivered_at, failed_at, error_code, error_message,
 		        created_at, updated_at, deleted_at
 		 FROM messages WHERE id = $1 AND `+r.softDeleteClause(),
 		id,
-	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status, &m.PreviousStatus,
+	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status,
 		&m.Source, &m.Destination, &m.Text, &m.Encoding, &m.Priority, &m.Parts, &m.DLRStatus, &m.DLRURL, &m.DLRID,
 		&m.ExternalID, &m.ClientRef, &m.RetryCount, &m.MaxRetries, &m.Price, &m.Cost,
 		&m.SentAt, &m.DeliveredAt, &m.FailedAt, &m.ErrorCode, &m.ErrorMessage,
@@ -90,14 +90,14 @@ func (r *MessageRepository) GetByClientRef(ctx context.Context, tenantID, client
 	q := r.getQuerier(ctx)
 	m := &domain.Message{}
 	err := q.QueryRow(ctx,
-		`SELECT id, tenant_id, connector_id, route_id, client_id, direction, status, previous_status,
+		`SELECT id, tenant_id, connector_id, route_id, client_id, direction, status,
 		        source, destination, text, encoding, priority, parts, dlr_status, dlr_url, dlr_id,
 		        external_id, client_ref, retry_count, max_retries, price, cost,
 		        sent_at, delivered_at, failed_at, error_code, error_message,
 		        created_at, updated_at, deleted_at
 		 FROM messages WHERE tenant_id = $1 AND client_ref = $2 AND `+r.softDeleteClause(),
 		tenantID, clientRef,
-	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status, &m.PreviousStatus,
+	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status,
 		&m.Source, &m.Destination, &m.Text, &m.Encoding, &m.Priority, &m.Parts, &m.DLRStatus, &m.DLRURL, &m.DLRID,
 		&m.ExternalID, &m.ClientRef, &m.RetryCount, &m.MaxRetries, &m.Price, &m.Cost,
 		&m.SentAt, &m.DeliveredAt, &m.FailedAt, &m.ErrorCode, &m.ErrorMessage,
@@ -118,14 +118,14 @@ func (r *MessageRepository) GetByExternalID(ctx context.Context, externalID stri
 	q := r.getQuerier(ctx)
 	m := &domain.Message{}
 	err := q.QueryRow(ctx,
-		`SELECT id, tenant_id, connector_id, route_id, client_id, direction, status, previous_status,
+		`SELECT id, tenant_id, connector_id, route_id, client_id, direction, status,
 		        source, destination, text, encoding, priority, parts, dlr_status, dlr_url, dlr_id,
 		        external_id, client_ref, retry_count, max_retries, price, cost,
 		        sent_at, delivered_at, failed_at, error_code, error_message,
 		        created_at, updated_at, deleted_at
 		 FROM messages WHERE external_id = $1 AND `+r.softDeleteClause(),
 		externalID,
-	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status, &m.PreviousStatus,
+	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status,
 		&m.Source, &m.Destination, &m.Text, &m.Encoding, &m.Priority, &m.Parts, &m.DLRStatus, &m.DLRURL, &m.DLRID,
 		&m.ExternalID, &m.ClientRef, &m.RetryCount, &m.MaxRetries, &m.Price, &m.Cost,
 		&m.SentAt, &m.DeliveredAt, &m.FailedAt, &m.ErrorCode, &m.ErrorMessage,
@@ -148,7 +148,6 @@ func (r *MessageRepository) UpdateStatus(ctx context.Context, id string, input d
 	err := q.QueryRow(ctx,
 		`UPDATE messages SET
 			status = COALESCE($1, status),
-			previous_status = CASE WHEN $1 IS NOT NULL AND $1 != status THEN status ELSE previous_status END,
 			connector_id = COALESCE($2, connector_id),
 			route_id = COALESCE($3, route_id),
 			external_id = COALESCE($4, external_id),
@@ -166,7 +165,7 @@ func (r *MessageRepository) UpdateStatus(ctx context.Context, id string, input d
 			updated_at = $15,
 			version = version + 1
 		 WHERE id = $16 AND version = $17 AND `+r.softDeleteClause()+`
-		 RETURNING id, tenant_id, connector_id, route_id, client_id, direction, status, previous_status,
+		 RETURNING id, tenant_id, connector_id, route_id, client_id, direction, status,
 		           source, destination, text, encoding, priority, parts, dlr_status, dlr_url, dlr_id,
 		           external_id, client_ref, retry_count, max_retries, price, cost,
 		           sent_at, delivered_at, failed_at, error_code, error_message,
@@ -177,7 +176,7 @@ func (r *MessageRepository) UpdateStatus(ctx context.Context, id string, input d
 		input.Parts, input.Price, input.Cost,
 		input.SentAt, input.DeliveredAt, input.FailedAt,
 		time.Now().UTC(), id, version,
-	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status, &m.PreviousStatus,
+	).Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status,
 		&m.Source, &m.Destination, &m.Text, &m.Encoding, &m.Priority, &m.Parts, &m.DLRStatus, &m.DLRURL, &m.DLRID,
 		&m.ExternalID, &m.ClientRef, &m.RetryCount, &m.MaxRetries, &m.Price, &m.Cost,
 		&m.SentAt, &m.DeliveredAt, &m.FailedAt, &m.ErrorCode, &m.ErrorMessage,
@@ -214,7 +213,7 @@ func (r *MessageRepository) List(ctx context.Context, filter domain.MessageFilte
 
 	q := r.getQuerier(ctx)
 
-	query := `SELECT id, tenant_id, connector_id, route_id, client_id, direction, status, previous_status,
+	query := `SELECT id, tenant_id, connector_id, route_id, client_id, direction, status,
 		        source, destination, text, encoding, priority, parts, dlr_status, dlr_url, dlr_id,
 		        external_id, client_ref, retry_count, max_retries, price, cost,
 		        sent_at, delivered_at, failed_at, error_code, error_message,
@@ -287,7 +286,7 @@ func (r *MessageRepository) List(ctx context.Context, filter domain.MessageFilte
 		return domain.PageResult[domain.Message]{}, err
 	}
 
-	// Paginated query
+	// Paginated query — uses composite index (tenant_id, status, created_at DESC)
 	query += ` ORDER BY created_at DESC LIMIT $` + fmt.Sprintf("%d", argIdx) + ` OFFSET $` + fmt.Sprintf("%d", argIdx+1)
 	args = append(args, filter.Page.Limit, filter.Page.Offset)
 
@@ -300,7 +299,7 @@ func (r *MessageRepository) List(ctx context.Context, filter domain.MessageFilte
 	var messages []domain.Message
 	for rows.Next() {
 		var m domain.Message
-		if err := rows.Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status, &m.PreviousStatus,
+		if err := rows.Scan(&m.ID, &m.TenantID, &m.ConnectorID, &m.RouteID, &m.ClientID, &m.Direction, &m.Status,
 			&m.Source, &m.Destination, &m.Text, &m.Encoding, &m.Priority, &m.Parts, &m.DLRStatus, &m.DLRURL, &m.DLRID,
 			&m.ExternalID, &m.ClientRef, &m.RetryCount, &m.MaxRetries, &m.Price, &m.Cost,
 			&m.SentAt, &m.DeliveredAt, &m.FailedAt, &m.ErrorCode, &m.ErrorMessage,

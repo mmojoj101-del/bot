@@ -99,7 +99,6 @@ func (r *mockMessageRepo) UpdateStatus(ctx context.Context, id string, input dom
 		return nil, domain.ErrConflict
 	}
 	if input.Status != nil {
-		m.PreviousStatus = &m.Status
 		m.Status = *input.Status
 	}
 	if input.ConnectorID != nil {
@@ -268,7 +267,7 @@ func TestMessageStateMachine_FullFlow(t *testing.T) {
 	}
 
 	// sending → sent
-	msg, err = svc.MarkSent(context.Background(), msg.ID, "ext-123", 1, 0.05, 0.02)
+	msg, err = svc.MarkSent(context.Background(), msg.ID, "ext-123", 1, 5000, 2000)
 	if err != nil {
 		t.Fatalf("MarkSent failed: %v", err)
 	}
@@ -330,7 +329,7 @@ func TestMessageStateMachine_RetryFlow(t *testing.T) {
 	// accepted → queued → sending → sent → retrying → sending → sent
 	msg, _ = svc.QueueMessage(context.Background(), msg.ID)
 	msg, _ = svc.SendMessage(context.Background(), msg.ID, "conn-1", "route-1")
-	msg, _ = svc.MarkSent(context.Background(), msg.ID, "ext-1", 1, 0.05, 0.02)
+	msg, _ = svc.MarkSent(context.Background(), msg.ID, "ext-1", 1, 5000, 2000)
 
 	msg, err := svc.MarkRetrying(context.Background(), msg.ID, "TIMEOUT", "Connection timeout")
 	if err != nil {

@@ -149,7 +149,7 @@ func (s *MessageService) SendMessage(ctx context.Context, id string, connectorID
 }
 
 // MarkSent transitions a message from sending → sent.
-func (s *MessageService) MarkSent(ctx context.Context, id, externalID string, parts int, price, cost float64) (*domain.Message, error) {
+func (s *MessageService) MarkSent(ctx context.Context, id, externalID string, parts int, price, cost int64) (*domain.Message, error) {
 	status := domain.MessageStatusSent
 	now := s.clock.Now()
 	return s.UpdateStatus(ctx, id, domain.UpdateMessageInput{
