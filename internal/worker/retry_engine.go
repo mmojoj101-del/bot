@@ -196,8 +196,13 @@ func (e *RetryEngine) IsHealthy() error {
 	case <-e.stopCh:
 		return fmt.Errorf("retry engine is stopped")
 	default:
-		return nil
 	}
+	if v, ok := e.lastBatchEndTime.Load().(time.Time); ok && !v.IsZero() {
+		if time.Since(v) > healthyIdleThreshold {
+			return fmt.Errorf("retry engine idle for %v (threshold %v)", time.Since(v).Round(time.Second), healthyIdleThreshold)
+		}
+	}
+	return nil
 }
 
 func (e *RetryEngine) HealthDetail() map[string]interface{} {

@@ -16,15 +16,30 @@ import (
 )
 
 // HTTPSender implements domain.Sender for HTTP-based connectors.
-// Uses a singleton http.Client with connection pooling and caches parsed templates.
+// Uses a singleton http.Client with connection pooling, template cache,
+// and optional per-connector circuit breaker integration.
 type HTTPSender struct {
-	connectorType domain.ConnectorType
-	client        *http.Client
-	tmplCache     sync.Map // map[templateString]*template.Template
+	connectorType  domain.ConnectorType
+	client         *http.Client
+	tmplCache      sync.Map // map[templateString]*template.Template
+	circuitBreakers CircuitBreakerStore
+
+	extractSource string // JSON dot-path for external ID
+	statusPath    string // JSON dot-path for provider status
 }
 
-func NewHTTPSender() *HTTPSender {
-	return &HTTPSender{
+// HTTPSenderOption configures an HTTPSender.
+type HTTPSenderOption func(*HTTPSender)
+
+// WithCircuitBreakerStore attaches a shared circuit breaker store.
+// The sender checks Allow() before each request and records Success()/Failure().
+func WithCircuitBreakerStore(cbs CircuitBreakerStore) HTTPSenderOption {
+	return func(s *HTTPSender) { s.circuitBreakers = cbs }
+}
+
+// NewHTTPSender creates an HTTP sender with connection pooling.
+func NewHTTPSender(opts ...HTTPSenderOption) *HTTPSender {
+	s := &HTTPSender{
 		connectorType: domain.ConnectorTypeHTTPClient,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -39,7 +54,12 @@ func NewHTTPSender() *HTTPSender {
 				ForceAttemptHTTP2:     true,
 			},
 		},
+		circuitBreakers: noopCircuitBreakerStore{}, // safe default — no-op
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *HTTPSender) Type() domain.ConnectorType {
@@ -49,6 +69,11 @@ func (s *HTTPSender) Type() domain.ConnectorType {
 func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.SendResult, error) {
 	if req.Connector == nil {
 		return nil, fmt.Errorf("connector config is nil")
+	}
+
+	// ── Circuit breaker check ──────────────────────────────────────
+	if !s.circuitBreakers.Allow(req.Connector.ID) {
+		return nil, fmt.Errorf("circuit breaker open for connector %s", req.Connector.ID)
 	}
 
 	// Parse connector config
@@ -97,12 +122,14 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 	// Send using the pooled client
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
+		s.circuitBreakers.Failure(req.Connector.ID)
 		return nil, fmt.Errorf("http send: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		s.circuitBreakers.Failure(req.Connector.ID)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
@@ -128,8 +155,15 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 				Body:       truncateString(string(respBody), 200),
 			}
 		}
+		// Non-retryable failure — record circuit breaker failure
+		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+			s.circuitBreakers.Failure(req.Connector.ID)
+		}
 		return nil, fmt.Errorf("provider returned status %d: %s", resp.StatusCode, truncateString(string(respBody), 200))
 	}
+
+	// Success — record circuit breaker success
+	s.circuitBreakers.Success(req.Connector.ID)
 
 	// Extract external ID from response
 	externalID := extractField(respBody, cfg.ExternalIDPath)
@@ -137,7 +171,7 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 
 	// Calculate parts
 	parts := countSMSParts(req.Message.Text, req.Message.Encoding)
-	price := int64(parts) * 5000 // placeholder: 0.05 per part, override in production
+	price := int64(parts) * 5000 // placeholder: 0.05 per part
 
 	return &domain.SendResult{
 		ExternalID:     externalID,

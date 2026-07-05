@@ -74,8 +74,8 @@ func New(
 
 	// DLR handler (for delivery receipts)
 	dlrMapper := connector.NewDefaultDLRMapper(domain.ConnectorTypeHTTPClient)
-	noopMetrics := connector.NewNoopMetricsRecorder()
-	dlrHandler := handler.NewDLRHandler(msgRepo, connectorRepo, dlrMapper, noopMetrics)
+	promMetrics := connector.NewPrometheusMetricsRecorder("fury", "dlr")
+	dlrHandler := handler.NewDLRHandler(msgRepo, connectorRepo, dlrMapper, promMetrics)
 
 	// ============================================================
 	// Initialize middleware

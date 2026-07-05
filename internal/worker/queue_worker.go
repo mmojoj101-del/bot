@@ -195,6 +195,10 @@ func (w *QueueWorker) Stop() {
 	w.wg.Wait()
 }
 
+// healthyIdleThreshold is the maximum time since the last successful batch
+// before the worker is considered unhealthy (stuck / deadlocked).
+const healthyIdleThreshold = 5 * time.Minute
+
 // IsHealthy returns nil if the worker is healthy.
 func (w *QueueWorker) IsHealthy() error {
 	if !w.running.Load() {
@@ -204,8 +208,15 @@ func (w *QueueWorker) IsHealthy() error {
 	case <-w.stopCh:
 		return fmt.Errorf("queue worker is stopped")
 	default:
-		return nil
 	}
+	// Check idle threshold: if the last batch was too long ago,
+	// the worker loop may be stuck (deadlock / infinite backoff).
+	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok && !v.IsZero() {
+		if time.Since(v) > healthyIdleThreshold {
+			return fmt.Errorf("queue worker idle for %v (threshold %v)", time.Since(v).Round(time.Second), healthyIdleThreshold)
+		}
+	}
+	return nil
 }
 
 // HealthDetail returns detailed health info about the worker.

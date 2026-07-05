@@ -83,10 +83,32 @@ func main() {
 	queueRepo := pgrepo.NewQueueRepository(db, txManager)
 	msgRepo := pgrepo.NewMessageRepository(db)
 	outboxRepo := pgrepo.NewOutboxRepository(db)
+	connRepo := pgrepo.NewConnectorRepository(db)
 
-	// Register senders
+	// Prometheus metrics (registered globally in the default registry)
+	promMetrics := connector.NewPrometheusMetricsRecorder("fury", "sms")
+
+	// Circuit breaker store (shared across all senders)
+	// onStateChange logs and records Prometheus metrics when a breaker trips
+	cbStore := connector.NewCircuitBreakerStore(
+		connector.WithFailureThreshold(5),
+		connector.WithResetTimeout(30*time.Second),
+		connector.WithOnStateChange(func(connectorID string, old, new connector.CircuitBreakerState) {
+			slog.Warn("circuit breaker state changed",
+				"connector_id", connectorID,
+				"old_state", old.String(),
+				"new_state", new.String(),
+			)
+			promMetrics.RecordWorkerRestart(fmt.Sprintf("cb_%s_%s", connectorID, new.String()))
+		}),
+	)
+
+	// Register senders with circuit breaker support
+	httpSender := connector.NewHTTPSender(
+		connector.WithCircuitBreakerStore(cbStore),
+	)
 	senders := map[domain.ConnectorType]domain.Sender{
-		connector.NewHTTPSender().Type(): connector.NewHTTPSender(),
+		httpSender.Type(): httpSender,
 	}
 
 	// Retry policy
@@ -97,10 +119,10 @@ func main() {
 		ctx,
 		queueRepo,
 		msgRepo,
-		nil, // connRepo — will need a connector repo here
+		connRepo,
 		senders,
 		retryPolicy,
-		nil, // metrics — use noop for now
+		promMetrics,
 		eventBus,
 		worker.WithBatchSize(100),
 		worker.WithPollInterval(1*time.Second),

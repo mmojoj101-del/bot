@@ -162,8 +162,13 @@ func (w *OutboxWorker) IsHealthy() error {
 	case <-w.stopCh:
 		return fmt.Errorf("outbox worker is stopped")
 	default:
-		return nil
 	}
+	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok && !v.IsZero() {
+		if time.Since(v) > healthyIdleThreshold {
+			return fmt.Errorf("outbox worker idle for %v (threshold %v)", time.Since(v).Round(time.Second), healthyIdleThreshold)
+		}
+	}
+	return nil
 }
 
 func (w *OutboxWorker) HealthDetail() map[string]interface{} {
