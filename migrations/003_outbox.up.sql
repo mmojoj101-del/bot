@@ -4,8 +4,8 @@
 -- ============================================================
 -- FIX: Convert price/cost from NUMERIC to BIGINT (thousandths of a cent)
 -- ============================================================
-ALTER TABLE messages ALTER COLUMN price TYPE BIGINT USING (price::BIGINT);
-ALTER TABLE messages ALTER COLUMN cost TYPE BIGINT USING (cost::BIGINT);
+ALTER TABLE messages ALTER COLUMN price TYPE BIGINT USING (ROUND(price * 100000)::BIGINT);
+ALTER TABLE messages ALTER COLUMN cost TYPE BIGINT USING (ROUND(cost * 100000)::BIGINT);
 
 -- ============================================================
 -- OUTBOX EVENTS
