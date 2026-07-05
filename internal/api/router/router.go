@@ -10,6 +10,7 @@ import (
 	"github.com/raghna/fury-sms-gateway/internal/api/handler"
 	"github.com/raghna/fury-sms-gateway/internal/api/middleware"
 	"github.com/raghna/fury-sms-gateway/internal/config"
+	"github.com/raghna/fury-sms-gateway/internal/connector"
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 	"github.com/raghna/fury-sms-gateway/internal/event"
 	pgrepo "github.com/raghna/fury-sms-gateway/internal/repository/postgres"
@@ -40,6 +41,7 @@ func New(
 	apiKeyRepo := pgrepo.NewAPIKeyRepository(db)
 	connectorRepo := pgrepo.NewConnectorRepository(db)
 	routeRepo := pgrepo.NewRouteRepository(db)
+	msgRepo := pgrepo.NewMessageRepository(db)
 	auditRepo := pgrepo.NewAuditLogRepository(db)
 	refreshTokenRepo := pgrepo.NewRefreshTokenRepository(db)
 	txManager := pgrepo.NewTxManager(db)
@@ -69,6 +71,11 @@ func New(
 	connectorHandler := handler.NewConnectorHandler(connectorService)
 	routeHandler := handler.NewRouteHandler(routeService)
 	auditHandler := handler.NewAuditHandler(auditService)
+
+	// DLR handler (for delivery receipts)
+	dlrMapper := connector.NewDefaultDLRMapper(domain.ConnectorTypeHTTPClient)
+	noopMetrics := connector.NewNoopMetricsRecorder()
+	dlrHandler := handler.NewDLRHandler(msgRepo, connectorRepo, dlrMapper, noopMetrics)
 
 	// ============================================================
 	// Initialize middleware
@@ -151,6 +158,9 @@ func New(
 	protected.Get("/routes/:id", routeHandler.GetByID)
 	protected.Put("/routes/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), routeHandler.Update)
 	protected.Delete("/routes/:id", rbacMiddleware.RequireRole(domain.MemberRoleAdmin), routeHandler.Delete)
+
+	// DLR callbacks (no JWT - called by external providers)
+	v1.Post("/dlr/:connector_id", dlrHandler.ReceiveDLR)
 
 	// Audit logs
 	protected.Get("/audit-logs", auditHandler.ListByTenant)

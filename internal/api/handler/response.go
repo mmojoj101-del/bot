@@ -97,3 +97,27 @@ func Created(c *fiber.Ctx, data interface{}) error {
 func NoContent(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
+
+// BadRequest sends a 400 bad request error.
+func BadRequest(c *fiber.Ctx, msg string) error {
+	return c.Status(fiber.StatusBadRequest).JSON(APIResponse{
+		Success: false,
+		Error:   msg,
+	})
+}
+
+// NotFound sends a 404 not found error.
+func NotFound(c *fiber.Ctx, msg string) error {
+	return c.Status(fiber.StatusNotFound).JSON(APIResponse{
+		Success: false,
+		Error:   msg,
+	})
+}
+
+// InternalError sends a 500 internal server error.
+func InternalError(c *fiber.Ctx, msg string) error {
+	return c.Status(fiber.StatusInternalServerError).JSON(APIResponse{
+		Success: false,
+		Error:   msg,
+	})
+}
