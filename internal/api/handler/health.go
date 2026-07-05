@@ -2,6 +2,7 @@ package handler
 
 import (
 	"log/slog"
+	"runtime"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -9,6 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+)
+
+// Build information set by ldflags in main.
+var (
+	Version   = "0.1.0"
+	GitCommit = "unknown"
+	BuildDate = "unknown"
 )
 
 // WorkerHealthChecker provides detailed health info for all workers.
@@ -35,12 +43,25 @@ func NewHealthHandler(db *pgxpool.Pool, rdb *redis.Client, workers WorkerHealthC
 	}
 }
 
+// startTime records when the handler was instantiated (≈ process start).
+var startTime = time.Now()
+
 // Health returns 200 OK (liveness). Always responds — for load balancers.
 func (h *HealthHandler) Health(c *fiber.Ctx) error {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"status":  "ok",
-		"service": "fury-sms-gateway",
-		"time":    time.Now().UTC().Format(time.RFC3339),
+		"status":      "ok",
+		"service":     "fury-sms-gateway",
+		"version":     Version,
+		"git_commit":  GitCommit,
+		"build_date":  BuildDate,
+		"uptime_sec":  time.Since(startTime).Seconds(),
+		"time":        time.Now().UTC().Format(time.RFC3339),
+		"goroutines":  runtime.NumGoroutine(),
+		"memory_kb":   m.Alloc / 1024,
+		"gc_pauses":   m.NumGC,
 	})
 }
 

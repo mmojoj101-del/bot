@@ -126,8 +126,10 @@ func (w *QueueWorker) Start() {
 		consecutiveFailures := 0
 		for {
 			if w.iteration() {
+				// Reset panic/success markers after a healthy iteration
 				backoff = 100 * time.Millisecond
 				consecutiveFailures = 0
+				w.lastPanicTime.Store(time.Time{}) // clear panic marker
 				continue
 			}
 			select {
@@ -187,19 +189,24 @@ func (w *QueueWorker) iteration() (ok bool) {
 }
 
 // Stop signals the worker to shut down gracefully. Idempotent.
+// Order: close(stopCh) → WaitGroup.Wait() → cancel(ctx)
+// This ensures in-flight HTTP requests and DB queries finish before context is cancelled.
 func (w *QueueWorker) Stop() {
 	w.stopOnce.Do(func() {
-		w.cancel()
 		close(w.stopCh)
 	})
 	w.wg.Wait()
+	// cancel after WaitGroup — in-flight requests use ctx from parent
+	w.cancel()
 }
 
-// healthyIdleThreshold is the maximum time since the last successful batch
-// before the worker is considered unhealthy (stuck / deadlocked).
+// healthyIdleThreshold is the maximum time since the last queue-draining
+// batch before the worker is considered stuck — ONLY when there is work.
 const healthyIdleThreshold = 5 * time.Minute
 
 // IsHealthy returns nil if the worker is healthy.
+// It checks: running flag, stop channel, and idle-with-work condition.
+// An empty queue with no work is NOT unhealthy — the worker is just waiting.
 func (w *QueueWorker) IsHealthy() error {
 	if !w.running.Load() {
 		return fmt.Errorf("queue worker is not running")
@@ -209,11 +216,13 @@ func (w *QueueWorker) IsHealthy() error {
 		return fmt.Errorf("queue worker is stopped")
 	default:
 	}
-	// Check idle threshold: if the last batch was too long ago,
-	// the worker loop may be stuck (deadlock / infinite backoff).
+	// Only report unhealthy if the worker is idle AND has pending messages
+	// (stuck / deadlock / infinite backoff with work to do).
+	// An empty queue (lastBatchMsgCnt == 0) means the worker is just waiting.
 	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok && !v.IsZero() {
-		if time.Since(v) > healthyIdleThreshold {
-			return fmt.Errorf("queue worker idle for %v (threshold %v)", time.Since(v).Round(time.Second), healthyIdleThreshold)
+		if w.lastBatchMsgCnt.Load() > 0 && time.Since(v) > healthyIdleThreshold {
+			return fmt.Errorf("queue worker idle for %v with work (threshold %v)",
+				time.Since(v).Round(time.Second), healthyIdleThreshold)
 		}
 	}
 	return nil

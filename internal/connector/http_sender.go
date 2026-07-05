@@ -155,8 +155,13 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 				Body:       truncateString(string(respBody), 200),
 			}
 		}
-		// Non-retryable failure — record circuit breaker failure
-		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+		// Failures that should trip the circuit breaker:
+		//   429 Too Many Requests
+		//   408 Request Timeout
+		//   502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
+		//   5xx (generic server errors)
+		// Client errors (4xx except 408/429) do NOT trip — they are misconfigurations.
+		if resp.StatusCode >= 500 || resp.StatusCode == 429 || resp.StatusCode == 408 {
 			s.circuitBreakers.Failure(req.Connector.ID)
 		}
 		return nil, fmt.Errorf("provider returned status %d: %s", resp.StatusCode, truncateString(string(respBody), 200))

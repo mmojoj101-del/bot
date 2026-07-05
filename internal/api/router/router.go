@@ -25,6 +25,7 @@ func New(
 	eventBus event.Bus,
 	clock domain.Clock,
 	workers handler.WorkerHealthChecker,
+	promMetrics *connector.PrometheusMetricsRecorder,
 ) (*fiber.App, error) {
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
@@ -72,9 +73,8 @@ func New(
 	routeHandler := handler.NewRouteHandler(routeService)
 	auditHandler := handler.NewAuditHandler(auditService)
 
-	// DLR handler (for delivery receipts)
+	// DLR handler (for delivery receipts) — uses same promMetrics to avoid duplicate promauto registration
 	dlrMapper := connector.NewDefaultDLRMapper(domain.ConnectorTypeHTTPClient)
-	promMetrics := connector.NewPrometheusMetricsRecorder("fury", "dlr")
 	dlrHandler := handler.NewDLRHandler(msgRepo, connectorRepo, dlrMapper, promMetrics)
 
 	// ============================================================

@@ -182,10 +182,10 @@ func (e *RetryEngine) iteration() (ok bool) {
 
 func (e *RetryEngine) Stop() {
 	e.stopOnce.Do(func() {
-		e.cancel()
 		close(e.stopCh)
 	})
 	e.wg.Wait()
+	e.cancel()
 }
 
 func (e *RetryEngine) IsHealthy() error {
@@ -197,9 +197,11 @@ func (e *RetryEngine) IsHealthy() error {
 		return fmt.Errorf("retry engine is stopped")
 	default:
 	}
+	// Only unhealthy if idle WITH work (processed > 0 last batch, no new batch)
 	if v, ok := e.lastBatchEndTime.Load().(time.Time); ok && !v.IsZero() {
-		if time.Since(v) > healthyIdleThreshold {
-			return fmt.Errorf("retry engine idle for %v (threshold %v)", time.Since(v).Round(time.Second), healthyIdleThreshold)
+		if e.lastBatchMsgCnt.Load() > 0 && time.Since(v) > healthyIdleThreshold {
+			return fmt.Errorf("retry engine idle for %v with work (threshold %v)",
+				time.Since(v).Round(time.Second), healthyIdleThreshold)
 		}
 	}
 	return nil

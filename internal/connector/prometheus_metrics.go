@@ -10,21 +10,22 @@ import (
 )
 
 // PrometheusMetricsRecorder implements MetricsRecorder using Prometheus client.
-// Create via NewPrometheusMetricsRecorder(namespace, subsystem).
+// NOTE: Create ONE instance per binary — promauto panics on duplicate registration.
 type PrometheusMetricsRecorder struct {
 	smsSentTotal    *prometheus.CounterVec
 	smsFailedTotal  *prometheus.CounterVec
 	smsRetryTotal   *prometheus.CounterVec
 	dlrReceivedTotal *prometheus.CounterVec
 
-	smsSentDuration  *prometheus.HistogramVec
-	batchDuration    *prometheus.HistogramVec
-	queueDepth       prometheus.Gauge
-	workerRestarts   *prometheus.GaugeVec
+	smsSentDuration          *prometheus.HistogramVec
+	batchDuration            *prometheus.HistogramVec
+	queueDepth               prometheus.Gauge
+	workerRestarts           *prometheus.GaugeVec
+	circuitBreakerStateChanges *prometheus.CounterVec
 }
 
 // NewPrometheusMetricsRecorder creates and registers all Prometheus metrics.
-// Use subsystem="queue" for the queue worker, "retry" for retry engine, etc.
+// Use subsystem to differentiate worker groups (e.g. "sms", "dlr").
 func NewPrometheusMetricsRecorder(namespace, subsystem string) *PrometheusMetricsRecorder {
 	return &PrometheusMetricsRecorder{
 		smsSentTotal: promauto.NewCounterVec(prometheus.CounterOpts{
@@ -32,28 +33,30 @@ func NewPrometheusMetricsRecorder(namespace, subsystem string) *PrometheusMetric
 			Subsystem: subsystem,
 			Name:      "sms_sent_total",
 			Help:      "Total number of SMS messages sent successfully.",
-		}, []string{"tenant_id", "connector_id"}),
+			// NOTE: intentionally NO tenant_id label to avoid high cardinality.
+			// Use connector_id + provider for aggregation.
+		}, []string{"connector_id"}),
 
 		smsFailedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "sms_failed_total",
 			Help:      "Total number of SMS message send failures.",
-		}, []string{"tenant_id", "connector_id", "error_code"}),
+		}, []string{"connector_id", "error_code"}),
 
 		smsRetryTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "sms_retry_total",
 			Help:      "Total number of SMS message retries.",
-		}, []string{"tenant_id"}),
+		}, []string{"connector_id"}),
 
 		dlrReceivedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "dlr_received_total",
 			Help:      "Total number of DLR callbacks received.",
-		}, []string{"tenant_id", "status"}),
+		}, []string{"connector_id", "status"}),
 
 		smsSentDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
@@ -69,7 +72,7 @@ func NewPrometheusMetricsRecorder(namespace, subsystem string) *PrometheusMetric
 			Name:      "batch_duration_seconds",
 			Help:      "Duration of worker batch processing in seconds.",
 			Buckets:   []float64{0.1, 0.5, 1, 2.5, 5, 10, 30},
-		}, []string{"worker"}),
+		}, []string{"worker_type"}),
 
 		queueDepth: promauto.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
@@ -84,29 +87,41 @@ func NewPrometheusMetricsRecorder(namespace, subsystem string) *PrometheusMetric
 			Name:      "worker_restarts_total",
 			Help:      "Total number of worker restarts due to panic.",
 		}, []string{"worker_type"}),
+
+		circuitBreakerStateChanges: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "circuit_breaker_state_changes_total",
+			Help:      "Total number of circuit breaker state transitions.",
+		}, []string{"connector_id", "state"}),
 	}
 }
 
 func (m *PrometheusMetricsRecorder) RecordMessageSent(tenantID, connectorID string, parts int, latency time.Duration) {
-	m.smsSentTotal.WithLabelValues(tenantID, connectorID).Inc()
+	m.smsSentTotal.WithLabelValues(connectorID).Inc()
 	m.smsSentDuration.WithLabelValues(connectorID).Observe(latency.Seconds())
 }
 
 func (m *PrometheusMetricsRecorder) RecordMessageFailed(tenantID, connectorID, errorCode string) {
-	m.smsFailedTotal.WithLabelValues(tenantID, connectorID, errorCode).Inc()
+	m.smsFailedTotal.WithLabelValues(connectorID, errorCode).Inc()
 }
 
 func (m *PrometheusMetricsRecorder) RecordDLRReceived(tenantID, status string) {
-	m.dlrReceivedTotal.WithLabelValues(tenantID, status).Inc()
+	m.dlrReceivedTotal.WithLabelValues("unknown", status).Inc()
 }
 
 func (m *PrometheusMetricsRecorder) RecordRetry(tenantID string, attempt int) {
-	m.smsRetryTotal.WithLabelValues(tenantID).Inc()
+	m.smsRetryTotal.WithLabelValues("unknown").Inc()
 }
 
 // RecordWorkerRestart increments the worker restart counter.
 func (m *PrometheusMetricsRecorder) RecordWorkerRestart(workerType string) {
 	m.workerRestarts.WithLabelValues(workerType).Inc()
+}
+
+// RecordCircuitBreakerStateChange records a circuit breaker state transition.
+func (m *PrometheusMetricsRecorder) RecordCircuitBreakerStateChange(connectorID, state string) {
+	m.circuitBreakerStateChanges.WithLabelValues(connectorID, state).Inc()
 }
 
 // RecordBatchDuration observes a batch processing duration.

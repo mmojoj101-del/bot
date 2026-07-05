@@ -89,6 +89,7 @@ func (w *OutboxWorker) Start() {
 			if w.iteration() {
 				backoff = 100 * time.Millisecond
 				consecutiveFailures = 0
+				w.lastPanicTime.Store(time.Time{})
 				continue
 			}
 			select {
@@ -148,10 +149,10 @@ func (w *OutboxWorker) iteration() (ok bool) {
 
 func (w *OutboxWorker) Stop() {
 	w.stopOnce.Do(func() {
-		w.cancel()
 		close(w.stopCh)
 	})
 	w.wg.Wait()
+	w.cancel()
 }
 
 func (w *OutboxWorker) IsHealthy() error {
@@ -164,8 +165,9 @@ func (w *OutboxWorker) IsHealthy() error {
 	default:
 	}
 	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok && !v.IsZero() {
-		if time.Since(v) > healthyIdleThreshold {
-			return fmt.Errorf("outbox worker idle for %v (threshold %v)", time.Since(v).Round(time.Second), healthyIdleThreshold)
+		if w.lastBatchMsgCnt.Load() > 0 && time.Since(v) > healthyIdleThreshold {
+			return fmt.Errorf("outbox worker idle for %v with work (threshold %v)",
+				time.Since(v).Round(time.Second), healthyIdleThreshold)
 		}
 	}
 	return nil

@@ -85,11 +85,11 @@ func main() {
 	outboxRepo := pgrepo.NewOutboxRepository(db)
 	connRepo := pgrepo.NewConnectorRepository(db)
 
-	// Prometheus metrics (registered globally in the default registry)
+	// Prometheus metrics — ONE instance per binary (promauto panics on duplicates)
 	promMetrics := connector.NewPrometheusMetricsRecorder("fury", "sms")
 
 	// Circuit breaker store (shared across all senders)
-	// onStateChange logs and records Prometheus metrics when a breaker trips
+	// dedicated metric: circuit_breaker_state_changes_total — not worker_restarts_total
 	cbStore := connector.NewCircuitBreakerStore(
 		connector.WithFailureThreshold(5),
 		connector.WithResetTimeout(30*time.Second),
@@ -99,7 +99,7 @@ func main() {
 				"old_state", old.String(),
 				"new_state", new.String(),
 			)
-			promMetrics.RecordWorkerRestart(fmt.Sprintf("cb_%s_%s", connectorID, new.String()))
+			promMetrics.RecordCircuitBreakerStateChange(connectorID, new.String())
 		}),
 	)
 
@@ -148,7 +148,7 @@ func main() {
 	workerHealth := worker.NewHealthChecker(qw, re, ow)
 
 	// Create Fiber app
-	app, err := router.New(cfg, db, rdb, eventBus, clock, workerHealth)
+	app, err := router.New(cfg, db, rdb, eventBus, clock, workerHealth, promMetrics)
 	if err != nil {
 		slog.Error("failed to create router", "error", err)
 		os.Exit(1)

@@ -110,7 +110,7 @@ func (h *DLRHandler) ReceiveDLR(c *fiber.Ctx) error {
 	}
 
 	if h.metrics != nil {
-		h.metrics.RecordDLRReceived(msg.TenantID, string(dlrStatus))
+		h.metrics.RecordDLRReceived(connectorID, string(dlrStatus))
 	}
 
 	slog.Info("dlr processed",
