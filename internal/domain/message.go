@@ -125,6 +125,30 @@ type Sender interface {
 }
 
 // ============================================================
+// Worker Safety & Idempotency Notes
+// ============================================================
+//
+// FOR UPDATE SKIP LOCKED:
+// When multiple workers pull messages from the queue, use:
+//   BEGIN;
+//   SELECT id FROM messages WHERE status = 'queued'
+//   ORDER BY created_at ASC LIMIT 100
+//   FOR UPDATE SKIP LOCKED;
+//   UPDATE messages SET status = 'sending', version = version + 1
+//   WHERE id = ANY($1);
+//   COMMIT;
+// This prevents two workers from picking the same message.
+//
+// Idempotency:
+//   - ClientRef:  Unique per tenant, set by the API caller. Blocks duplicate submissions.
+//   - ExternalID: Unique per connector (SMSC message ID). Set when message is sent.
+//   - DLR:        DLR updates must be idempotent — if a DLR arrives twice,
+//                 UpdateStatus should check the current status and skip if terminal.
+//   - ClientRef check is done BEFORE create (GetByClientRef).
+//   - ExternalID is set AFTER successful send.
+//   - DLR dedup: check if message is already 'delivered' or 'failed' before updating.
+
+// ============================================================
 // Message State Machine
 // ============================================================
 
@@ -155,3 +179,8 @@ func ValidateTransition(current, next MessageStatus) error {
 
 // MaxRetriesDefault is the default maximum retry count.
 const MaxRetriesDefault = 3
+
+// MoneyScale is the scaling factor for monetary values.
+// Stored as int64 (thousandths of a cent), divide by MoneyScale to get the unit value.
+// Example: 1.50000 USD = 150000 stored, 150000 / 100000 = 1.5
+const MoneyScale int64 = 100000

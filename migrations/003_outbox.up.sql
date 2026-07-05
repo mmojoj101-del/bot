@@ -1,5 +1,11 @@
 -- 003_outbox.up.sql
--- Fury SMS Gateway - Outbox pattern for reliable event publishing
+-- Fury SMS Gateway - Price type fix, Outbox pattern, DLR fields, Metrics
+
+-- ============================================================
+-- FIX: Convert price/cost from NUMERIC to BIGINT (thousandths of a cent)
+-- ============================================================
+ALTER TABLE messages ALTER COLUMN price TYPE BIGINT USING (price::BIGINT);
+ALTER TABLE messages ALTER COLUMN cost TYPE BIGINT USING (cost::BIGINT);
 
 -- ============================================================
 -- OUTBOX EVENTS
