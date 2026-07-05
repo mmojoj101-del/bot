@@ -72,3 +72,56 @@ const (
 	AuditActionAPIKeyAuth      AuditAction = "api_key_auth"
 	AuditActionConnectorTested AuditAction = "connector_tested"
 )
+
+// MessageStatus represents the lifecycle status of a message.
+type MessageStatus string
+
+const (
+	MessageStatusAccepted  MessageStatus = "accepted"
+	MessageStatusQueued    MessageStatus = "queued"
+	MessageStatusSending   MessageStatus = "sending"
+	MessageStatusSent      MessageStatus = "sent"
+	MessageStatusDelivered MessageStatus = "delivered"
+	MessageStatusFailed    MessageStatus = "failed"
+	MessageStatusRetrying  MessageStatus = "retrying"
+)
+
+// Direction represents the direction of a message.
+type Direction string
+
+const (
+	DirectionOutbound Direction = "outbound"
+	DirectionInbound  Direction = "inbound"
+)
+
+// Encoding represents the character encoding of a message.
+type Encoding string
+
+const (
+	EncodingGSM7     Encoding = "gsm7"
+	EncodingUCS2     Encoding = "ucs2"
+	EncodingLatin1   Encoding = "latin1"
+	EncodingASCII    Encoding = "ascii"
+)
+
+// MessagePriority represents the priority level of a message.
+type MessagePriority string
+
+const (
+	MessagePriorityLow    MessagePriority = "low"
+	MessagePriorityNormal MessagePriority = "normal"
+	MessagePriorityHigh   MessagePriority = "high"
+	MessagePriorityUrgent MessagePriority = "urgent"
+)
+
+// DLRStatus represents the delivery receipt status.
+type DLRStatus string
+
+const (
+	DLRStatusPending    DLRStatus = "pending"
+	DLRStatusDelivered  DLRStatus = "delivered"
+	DLRStatusFailed     DLRStatus = "failed"
+	DLRStatusExpired    DLRStatus = "expired"
+	DLRStatusRejected   DLRStatus = "rejected"
+	DLRStatusUnknown    DLRStatus = "unknown"
+)

@@ -39,4 +39,23 @@ const (
 	EventRouteUpdated       = "route.updated"
 	EventRouteDeleted       = "route.deleted"
 	EventAuditLogged        = "audit.logged"
+
+	// Message events
+	EventMessageAccepted  = "message.accepted"
+	EventMessageQueued    = "message.queued"
+	EventMessageSending   = "message.sending"
+	EventMessageSent      = "message.sent"
+	EventMessageDelivered = "message.delivered"
+	EventMessageFailed    = "message.failed"
 )
+
+// MessageEventPayload carries common fields for message events.
+type MessageEventPayload struct {
+	MessageID   string `json:"message_id"`
+	TenantID    string `json:"tenant_id"`
+	ClientID    string `json:"client_id"`
+	Status      string `json:"status"`
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	ErrorCode   string `json:"error_code,omitempty"`
+}

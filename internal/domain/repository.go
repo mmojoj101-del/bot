@@ -75,6 +75,19 @@ type RouteRepository interface {
 	CountByTenant(ctx context.Context, tenantID string) (int64, error)
 }
 
+// MessageRepository defines the interface for message persistence.
+type MessageRepository interface {
+	Create(ctx context.Context, input CreateMessageInput, createdBy string) (*Message, error)
+	GetByID(ctx context.Context, id string) (*Message, error)
+	GetByClientRef(ctx context.Context, tenantID, clientRef string) (*Message, error)
+	GetByExternalID(ctx context.Context, externalID string) (*Message, error)
+	UpdateStatus(ctx context.Context, id string, input UpdateMessageInput, version int) (*Message, error)
+	AppendDLR(ctx context.Context, dlr *DLRRecord) error
+	List(ctx context.Context, filter MessageFilter) (PageResult[Message], error)
+	Count(ctx context.Context, filter MessageFilter) (int64, error)
+	Delete(ctx context.Context, id string) error
+}
+
 // AuditLogRepository defines the interface for audit log persistence.
 type AuditLogRepository interface {
 	Create(ctx context.Context, log *AuditLog) error
