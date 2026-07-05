@@ -20,10 +20,14 @@ type OutboxWorker struct {
 	batchSize    int
 	pollInterval time.Duration
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	ctx     context.Context
+	cancel  context.CancelFunc
+	stopCh  chan struct{}
+	stopOnce sync.Once
+	wg      sync.WaitGroup
 
-	running atomic.Bool
+	running    atomic.Bool
+	restartCnt atomic.Int64
 }
 
 func NewOutboxWorker(
@@ -31,12 +35,15 @@ func NewOutboxWorker(
 	eventBus event.Bus,
 	opts ...OutboxWorkerOption,
 ) *OutboxWorker {
+	ctx, cancel := context.WithCancel(context.Background())
 	w := &OutboxWorker{
 		outboxRepo:   outboxRepo,
 		eventBus:     eventBus,
 		batchSize:    100,
 		pollInterval: 500 * time.Millisecond,
 		stopCh:       make(chan struct{}),
+		cancel:       cancel,
+		ctx:          ctx,
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -60,26 +67,43 @@ func (w *OutboxWorker) Start() {
 	go func() {
 		defer w.wg.Done()
 		defer w.running.Store(false)
+		backoff := 100 * time.Millisecond
 		for {
-			if !w.iteration() {
+			if w.iteration() {
+				backoff = 100 * time.Millisecond
+				continue
+			}
+			select {
+			case <-w.stopCh:
 				return
+			default:
+				slog.Warn("outbox worker restarting",
+					"restart_count", w.restartCnt.Load(),
+					"backoff_ms", backoff.Milliseconds(),
+				)
+				time.Sleep(backoff)
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
 			}
 		}
 	}()
 	slog.Info("outbox worker started", "batch_size", w.batchSize, "poll_interval", w.pollInterval)
 }
 
-func (w *OutboxWorker) iteration() bool {
+func (w *OutboxWorker) iteration() (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("outbox worker panic recovered, restarting...", "panic", r)
-			time.Sleep(time.Second)
+			w.restartCnt.Add(1)
+			slog.Error("outbox worker panic recovered",
+				"panic", r,
+				"restart_count", w.restartCnt.Load(),
+			)
+			ok = false
 		}
 	}()
-
 	select {
 	case <-w.stopCh:
-		slog.Info("outbox worker stopped")
 		return false
 	default:
 		w.processBatch()
@@ -89,13 +113,16 @@ func (w *OutboxWorker) iteration() bool {
 }
 
 func (w *OutboxWorker) Stop() {
-	close(w.stopCh)
+	w.stopOnce.Do(func() {
+		w.cancel()
+		close(w.stopCh)
+	})
 	w.wg.Wait()
 }
 
 func (w *OutboxWorker) IsHealthy() error {
 	if !w.running.Load() {
-		return fmt.Errorf("outbox worker goroutine is not running")
+		return fmt.Errorf("outbox worker is not running")
 	}
 	select {
 	case <-w.stopCh:
@@ -105,8 +132,19 @@ func (w *OutboxWorker) IsHealthy() error {
 	}
 }
 
+func (w *OutboxWorker) HealthDetail() map[string]interface{} {
+	return map[string]interface{}{
+		"alive":         w.running.Load(),
+		"stopped":       isClosed(w.stopCh),
+		"restart_count": w.restartCnt.Load(),
+		"batch_size":    w.batchSize,
+		"poll_interval": w.pollInterval.String(),
+		"type":          "outbox_worker",
+	}
+}
+
 func (w *OutboxWorker) processBatch() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(w.ctx, 10*time.Second)
 	defer cancel()
 
 	events, err := w.outboxRepo.GetPending(ctx, w.batchSize)
@@ -114,14 +152,10 @@ func (w *OutboxWorker) processBatch() {
 		slog.Error("get pending outbox events", "error", err)
 		return
 	}
-
 	if len(events) == 0 {
 		return
 	}
 
-	// Publish then mark each event individually.
-	// At-least-once delivery: if MarkPublished fails after publish,
-	// the event will be re-published on restart. Subscribers must be idempotent.
 	published := 0
 	for _, evt := range events {
 		select {

@@ -25,11 +25,13 @@ type QueueWorker struct {
 	pollInterval time.Duration
 
 	ctx     context.Context
-	cancel  context.CancelFunc // cancels in-flight operations on shutdown
+	cancel  context.CancelFunc
 	stopCh  chan struct{}
+	stopOnce sync.Once
 	wg      sync.WaitGroup
 
-	running atomic.Bool
+	running    atomic.Bool
+	restartCnt atomic.Int64
 }
 
 // eventPublisher is a subset of the event bus used by the worker.
@@ -87,28 +89,47 @@ func (w *QueueWorker) Start() {
 	go func() {
 		defer w.wg.Done()
 		defer w.running.Store(false)
+		backoff := 100 * time.Millisecond
 		for {
-			if !w.iteration() {
+			if w.iteration() {
+				backoff = 100 * time.Millisecond // reset on success
+				continue
+			}
+			// iteration returned false — check if we should stop or restart
+			select {
+			case <-w.stopCh:
 				return
+			default:
+				// Restart after panic
+				slog.Warn("queue worker restarting",
+					"restart_count", w.restartCnt.Load(),
+					"backoff_ms", backoff.Milliseconds(),
+				)
+				time.Sleep(backoff)
+				if backoff < 30*time.Second {
+					backoff *= 2 // exponential backoff: 100ms → 200ms → 400ms → ...
+				}
 			}
 		}
 	}()
 	slog.Info("queue worker started", "batch_size", w.batchSize, "poll_interval", w.pollInterval)
 }
 
-// iteration runs one poll cycle and returns false if we should stop.
-func (w *QueueWorker) iteration() bool {
-	// Panic recovery WITH auto-restart
+// iteration runs one poll cycle. Returns true on success, false on panic/shutdown.
+func (w *QueueWorker) iteration() (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("queue worker panic recovered, restarting...", "panic", r)
-			time.Sleep(time.Second) // prevent tight restart loop
+			w.restartCnt.Add(1)
+			slog.Error("queue worker panic recovered",
+				"panic", r,
+				"restart_count", w.restartCnt.Load(),
+			)
+			ok = false
 		}
 	}()
 
 	select {
 	case <-w.stopCh:
-		slog.Info("queue worker stopped")
 		return false
 	default:
 		w.processBatch()
@@ -117,18 +138,19 @@ func (w *QueueWorker) iteration() bool {
 	}
 }
 
-// Stop signals the worker to shut down gracefully.
-// Cancels in-flight operations and waits for the goroutine to exit.
+// Stop signals the worker to shut down gracefully. Idempotent — safe to call multiple times.
 func (w *QueueWorker) Stop() {
-	w.cancel()     // interrupt in-flight DB queries and HTTP sends
-	close(w.stopCh) // signal loop to stop
-	w.wg.Wait()     // wait for goroutine to exit
+	w.stopOnce.Do(func() {
+		w.cancel()
+		close(w.stopCh)
+	})
+	w.wg.Wait()
 }
 
 // IsHealthy returns nil if the worker is healthy.
 func (w *QueueWorker) IsHealthy() error {
 	if !w.running.Load() {
-		return fmt.Errorf("queue worker goroutine is not running")
+		return fmt.Errorf("queue worker is not running")
 	}
 	select {
 	case <-w.stopCh:
@@ -138,14 +160,24 @@ func (w *QueueWorker) IsHealthy() error {
 	}
 }
 
+// HealthDetail returns detailed health info about the worker.
+func (w *QueueWorker) HealthDetail() map[string]interface{} {
+	return map[string]interface{}{
+		"alive":          w.running.Load(),
+		"stopped":        isClosed(w.stopCh),
+		"restart_count":  w.restartCnt.Load(),
+		"batch_size":     w.batchSize,
+		"poll_interval":  w.pollInterval.String(),
+		"type":           "queue_worker",
+	}
+}
+
 func (w *QueueWorker) processBatch() {
-	// Use the worker's cancellable context so shutdown interrupts in-flight sends
 	messages, err := w.queueRepo.ClaimQueued(w.ctx, w.batchSize)
 	if err != nil {
 		slog.Error("claim queued messages", "error", err)
 		return
 	}
-
 	if len(messages) == 0 {
 		return
 	}
@@ -231,5 +263,15 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 func (w *QueueWorker) ackFailed(ctx context.Context, msg domain.Message, errorCode, errorMessage string) {
 	if err := w.queueRepo.AckFailed(ctx, msg.ID, int(msg.Version), errorCode, errorMessage); err != nil {
 		slog.Error("ack failed", "message_id", msg.ID, "error", err)
+	}
+}
+
+// isClosed reports whether a channel is closed.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
