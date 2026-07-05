@@ -92,8 +92,9 @@ func main() {
 	// Retry policy
 	retryPolicy := worker.NewDefaultRetryPolicy()
 
-	// Create workers
+	// Create workers — all share the root ctx so main owns the context tree
 	qw := worker.NewQueueWorker(
+		ctx,
 		queueRepo,
 		msgRepo,
 		nil, // connRepo — will need a connector repo here
@@ -106,6 +107,7 @@ func main() {
 	)
 
 	re := worker.NewRetryEngine(
+		ctx,
 		queueRepo,
 		retryPolicy,
 		worker.RetryEngineWithBatchSize(100),
@@ -113,6 +115,7 @@ func main() {
 	)
 
 	ow := worker.NewOutboxWorker(
+		ctx,
 		outboxRepo,
 		eventBus,
 		worker.OutboxWorkerWithBatchSize(100),

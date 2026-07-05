@@ -12,20 +12,31 @@ import (
 	"github.com/raghna/fury-sms-gateway/internal/event"
 )
 
-// MaxConsecutiveRestarts is the threshold after which a CRITICAL log is emitted.
+// MaxConsecutiveRestarts is the threshold after which the OnRestart callback
+// receives a critical flag (and the metric counter is incremented).
 const MaxConsecutiveRestarts = 10
+
+// RestartEvent carries information about a worker restart.
+type RestartEvent struct {
+	WorkerType         string
+	RestartCount       int64
+	ConsecutiveFailures int
+	Backoff            time.Duration
+	Critical           bool
+}
 
 // QueueWorker pulls queued messages and sends them through the appropriate connector.
 type QueueWorker struct {
-	queueRepo  domain.QueueRepository
-	msgRepo    domain.MessageRepository
-	connRepo   domain.ConnectorRepository
-	senders    map[domain.ConnectorType]domain.Sender
-	retry      domain.RetryPolicy
-	metrics    domain.MetricsRecorder
-	eventBus   eventPublisher
-	batchSize  int
+	queueRepo    domain.QueueRepository
+	msgRepo      domain.MessageRepository
+	connRepo     domain.ConnectorRepository
+	senders      map[domain.ConnectorType]domain.Sender
+	retry        domain.RetryPolicy
+	metrics      domain.MetricsRecorder
+	eventBus     eventPublisher
+	batchSize    int
 	pollInterval time.Duration
+	onRestart    func(RestartEvent)
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -35,6 +46,12 @@ type QueueWorker struct {
 
 	running    atomic.Bool
 	restartCnt atomic.Int64
+
+	lastPanicTime    atomic.Value // time.Time
+	lastSuccessTime  atomic.Value // time.Time
+	lastBatchEndTime atomic.Value // time.Time
+	lastBatchMsgCnt  atomic.Int64
+	lastBatchDur     atomic.Int64 // nanoseconds
 }
 
 // eventPublisher is a subset of the event bus used by the worker.
@@ -43,7 +60,9 @@ type eventPublisher interface {
 }
 
 // NewQueueWorker creates a new queue worker.
+// Accept a parent context so main owns the context tree.
 func NewQueueWorker(
+	parentCtx context.Context,
 	queueRepo domain.QueueRepository,
 	msgRepo domain.MessageRepository,
 	connRepo domain.ConnectorRepository,
@@ -53,7 +72,7 @@ func NewQueueWorker(
 	eventBus eventPublisher,
 	opts ...QueueWorkerOption,
 ) *QueueWorker {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	w := &QueueWorker{
 		queueRepo:    queueRepo,
 		msgRepo:      msgRepo,
@@ -67,7 +86,11 @@ func NewQueueWorker(
 		stopCh:       make(chan struct{}),
 		cancel:       cancel,
 		ctx:          ctx,
+		onRestart:    func(RestartEvent) {},
 	}
+	w.lastPanicTime.Store(time.Time{})
+	w.lastSuccessTime.Store(time.Time{})
+	w.lastBatchEndTime.Store(time.Time{})
 	for _, opt := range opts {
 		opt(w)
 	}
@@ -85,6 +108,13 @@ func WithPollInterval(d time.Duration) QueueWorkerOption {
 	return func(w *QueueWorker) { w.pollInterval = d }
 }
 
+// WithRestartCallback registers a callback invoked on every restart.
+// The callback receives a RestartEvent with context about the failure.
+// Use this for Prometheus counters, alert hooks, or circuit-breaker logic.
+func WithRestartCallback(fn func(RestartEvent)) QueueWorkerOption {
+	return func(w *QueueWorker) { w.onRestart = fn }
+}
+
 // Start begins the worker loop in a goroutine with panic recovery and auto-restart.
 func (w *QueueWorker) Start() {
 	w.running.Store(true)
@@ -96,29 +126,36 @@ func (w *QueueWorker) Start() {
 		consecutiveFailures := 0
 		for {
 			if w.iteration() {
-				backoff = 100 * time.Millisecond // reset on success
+				backoff = 100 * time.Millisecond
 				consecutiveFailures = 0
 				continue
 			}
-			// iteration returned false — check if we should stop or restart
 			select {
 			case <-w.stopCh:
 				return
 			default:
 				consecutiveFailures++
+				critical := consecutiveFailures >= MaxConsecutiveRestarts
 				level := slog.LevelWarn
-				if consecutiveFailures >= MaxConsecutiveRestarts {
+				if critical {
 					level = slog.LevelError
 				}
-				slog.Log(context.Background(), level,
+				slog.Log(w.ctx, level,
 					"queue worker restarting",
 					"restart_count", w.restartCnt.Load(),
 					"consecutive_failures", consecutiveFailures,
 					"backoff_ms", backoff.Milliseconds(),
 				)
+				w.onRestart(RestartEvent{
+					WorkerType:          "queue_worker",
+					RestartCount:        w.restartCnt.Load(),
+					ConsecutiveFailures: consecutiveFailures,
+					Backoff:             backoff,
+					Critical:            critical,
+				})
 				time.Sleep(backoff)
 				if backoff < 30*time.Second {
-					backoff *= 2 // exponential: 100ms → 200ms → 400ms → ... → 30s
+					backoff *= 2
 				}
 			}
 		}
@@ -131,6 +168,7 @@ func (w *QueueWorker) iteration() (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			w.restartCnt.Add(1)
+			w.lastPanicTime.Store(time.Now())
 			slog.Error("queue worker panic recovered",
 				"panic", r,
 				"restart_count", w.restartCnt.Load(),
@@ -138,7 +176,6 @@ func (w *QueueWorker) iteration() (ok bool) {
 			ok = false
 		}
 	}()
-
 	select {
 	case <-w.stopCh:
 		return false
@@ -149,7 +186,7 @@ func (w *QueueWorker) iteration() (ok bool) {
 	}
 }
 
-// Stop signals the worker to shut down gracefully. Idempotent — safe to call multiple times.
+// Stop signals the worker to shut down gracefully. Idempotent.
 func (w *QueueWorker) Stop() {
 	w.stopOnce.Do(func() {
 		w.cancel()
@@ -172,24 +209,45 @@ func (w *QueueWorker) IsHealthy() error {
 }
 
 // HealthDetail returns detailed health info about the worker.
+// The returned map is compatible with JSON serialisation for /ready endpoint.
 func (w *QueueWorker) HealthDetail() map[string]interface{} {
+	var lastPanic, lastSuccess, lastBatchEnd time.Time
+	if v, ok := w.lastPanicTime.Load().(time.Time); ok {
+		lastPanic = v
+	}
+	if v, ok := w.lastSuccessTime.Load().(time.Time); ok {
+		lastSuccess = v
+	}
+	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok {
+		lastBatchEnd = v
+	}
+
 	return map[string]interface{}{
-		"alive":          w.running.Load(),
-		"stopped":        isClosed(w.stopCh),
-		"restart_count":  w.restartCnt.Load(),
-		"batch_size":     w.batchSize,
-		"poll_interval":  w.pollInterval.String(),
-		"type":           "queue_worker",
+		"type":                "queue_worker",
+		"alive":               w.running.Load(),
+		"stopped":             isClosed(w.stopCh),
+		"restart_count":       w.restartCnt.Load(),
+		"batch_size":          w.batchSize,
+		"poll_interval":       w.pollInterval.String(),
+		"last_panic_at":       nullTime(lastPanic),
+		"last_success_at":     nullTime(lastSuccess),
+		"last_batch_at":       nullTime(lastBatchEnd),
+		"last_batch_msgs":     w.lastBatchMsgCnt.Load(),
+		"last_batch_duration": durationMillis(w.lastBatchDur.Load()),
 	}
 }
 
 func (w *QueueWorker) processBatch() {
+	start := time.Now()
+
 	messages, err := w.queueRepo.ClaimQueued(w.ctx, w.batchSize)
 	if err != nil {
 		slog.Error("claim queued messages", "error", err)
+		w.recordBatchEnd(start, 0)
 		return
 	}
 	if len(messages) == 0 {
+		w.recordBatchEnd(start, 0)
 		return
 	}
 
@@ -197,11 +255,21 @@ func (w *QueueWorker) processBatch() {
 		select {
 		case <-w.stopCh:
 			slog.Warn("shutting down, abandoning claimed messages", "count", len(messages))
+			w.recordBatchEnd(start, 0)
 			return
 		default:
 		}
 		w.processMessage(w.ctx, msg)
 	}
+
+	w.recordBatchEnd(start, len(messages))
+}
+
+func (w *QueueWorker) recordBatchEnd(start time.Time, msgCount int) {
+	elapsed := time.Since(start)
+	w.lastBatchEndTime.Store(time.Now())
+	w.lastBatchMsgCnt.Store(int64(msgCount))
+	w.lastBatchDur.Store(elapsed.Nanoseconds())
 }
 
 func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
@@ -236,7 +304,6 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 
 	if err != nil {
 		logger.Warn("send failed", "error", err, "retry_count", msg.RetryCount, "max_retries", msg.MaxRetries)
-
 		if msg.RetryCount < msg.MaxRetries {
 			if err := w.queueRepo.ScheduleRetry(ctx, msg.ID, int(msg.Version), "SEND_FAILED", err.Error()); err != nil {
 				logger.Error("schedule retry", "error", err)
@@ -269,6 +336,8 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 	if w.metrics != nil {
 		w.metrics.RecordMessageSent(msg.TenantID, *msg.ConnectorID, result.Parts, latency)
 	}
+
+	w.lastSuccessTime.Store(time.Now())
 }
 
 func (w *QueueWorker) ackFailed(ctx context.Context, msg domain.Message, errorCode, errorMessage string) {
@@ -285,4 +354,15 @@ func isClosed(ch <-chan struct{}) bool {
 	default:
 		return false
 	}
+}
+
+func nullTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+func durationMillis(ns int64) float64 {
+	return float64(ns) / 1e6
 }

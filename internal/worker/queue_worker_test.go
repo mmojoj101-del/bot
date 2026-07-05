@@ -240,7 +240,7 @@ func TestConcurrentWorkers_NoDoubleSend(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			worker := NewQueueWorker(
-				queueRepo, msgRepo, connRepo, senders, retryPolicy, nil, nil,
+				context.Background(), queueRepo, msgRepo, connRepo, senders, retryPolicy, nil, nil,
 				WithBatchSize(batchSize),
 			)
 			// Each worker processes one batch
@@ -305,7 +305,7 @@ func TestConcurrentWorker_RetryFlow(t *testing.T) {
 	retryPolicy := NewDefaultRetryPolicy()
 
 	worker := NewQueueWorker(
-		queueRepo, msgRepo, connRepo, senders, retryPolicy, nil, nil,
+		context.Background(), queueRepo, msgRepo, connRepo, senders, retryPolicy, nil, nil,
 		WithBatchSize(10),
 	)
 

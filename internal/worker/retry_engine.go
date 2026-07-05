@@ -53,6 +53,7 @@ type RetryEngine struct {
 	retryPolicy  domain.RetryPolicy
 	batchSize    int
 	pollInterval time.Duration
+	onRestart    func(RestartEvent)
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -62,14 +63,21 @@ type RetryEngine struct {
 
 	running    atomic.Bool
 	restartCnt atomic.Int64
+
+	lastPanicTime    atomic.Value // time.Time
+	lastSuccessTime  atomic.Value // time.Time
+	lastBatchEndTime atomic.Value // time.Time
+	lastBatchMsgCnt  atomic.Int64
+	lastBatchDur     atomic.Int64
 }
 
 func NewRetryEngine(
+	parentCtx context.Context,
 	queueRepo domain.QueueRepository,
 	retryPolicy domain.RetryPolicy,
 	opts ...RetryEngineOption,
 ) *RetryEngine {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	e := &RetryEngine{
 		queueRepo:    queueRepo,
 		retryPolicy:  retryPolicy,
@@ -78,7 +86,11 @@ func NewRetryEngine(
 		stopCh:       make(chan struct{}),
 		cancel:       cancel,
 		ctx:          ctx,
+		onRestart:    func(RestartEvent) {},
 	}
+	e.lastPanicTime.Store(time.Time{})
+	e.lastSuccessTime.Store(time.Time{})
+	e.lastBatchEndTime.Store(time.Time{})
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -93,6 +105,10 @@ func RetryEngineWithBatchSize(size int) RetryEngineOption {
 
 func RetryEngineWithPollInterval(d time.Duration) RetryEngineOption {
 	return func(e *RetryEngine) { e.pollInterval = d }
+}
+
+func RetryEngineWithRestartCallback(fn func(RestartEvent)) RetryEngineOption {
+	return func(e *RetryEngine) { e.onRestart = fn }
 }
 
 func (e *RetryEngine) Start() {
@@ -114,16 +130,24 @@ func (e *RetryEngine) Start() {
 				return
 			default:
 				consecutiveFailures++
+				critical := consecutiveFailures >= MaxConsecutiveRestarts
 				level := slog.LevelWarn
-				if consecutiveFailures >= MaxConsecutiveRestarts {
+				if critical {
 					level = slog.LevelError
 				}
-				slog.Log(context.Background(), level,
+				slog.Log(e.ctx, level,
 					"retry engine restarting",
 					"restart_count", e.restartCnt.Load(),
 					"consecutive_failures", consecutiveFailures,
 					"backoff_ms", backoff.Milliseconds(),
 				)
+				e.onRestart(RestartEvent{
+					WorkerType:          "retry_engine",
+					RestartCount:        e.restartCnt.Load(),
+					ConsecutiveFailures: consecutiveFailures,
+					Backoff:             backoff,
+					Critical:            critical,
+				})
 				time.Sleep(backoff)
 				if backoff < 30*time.Second {
 					backoff *= 2
@@ -138,6 +162,7 @@ func (e *RetryEngine) iteration() (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			e.restartCnt.Add(1)
+			e.lastPanicTime.Store(time.Now())
 			slog.Error("retry engine panic recovered",
 				"panic", r,
 				"restart_count", e.restartCnt.Load(),
@@ -176,17 +201,34 @@ func (e *RetryEngine) IsHealthy() error {
 }
 
 func (e *RetryEngine) HealthDetail() map[string]interface{} {
+	var lastPanic, lastSuccess, lastBatchEnd time.Time
+	if v, ok := e.lastPanicTime.Load().(time.Time); ok {
+		lastPanic = v
+	}
+	if v, ok := e.lastSuccessTime.Load().(time.Time); ok {
+		lastSuccess = v
+	}
+	if v, ok := e.lastBatchEndTime.Load().(time.Time); ok {
+		lastBatchEnd = v
+	}
 	return map[string]interface{}{
-		"alive":         e.running.Load(),
-		"stopped":       isClosed(e.stopCh),
-		"restart_count": e.restartCnt.Load(),
-		"batch_size":    e.batchSize,
-		"poll_interval": e.pollInterval.String(),
-		"type":          "retry_engine",
+		"type":               "retry_engine",
+		"alive":              e.running.Load(),
+		"stopped":            isClosed(e.stopCh),
+		"restart_count":      e.restartCnt.Load(),
+		"batch_size":         e.batchSize,
+		"poll_interval":      e.pollInterval.String(),
+		"last_panic_at":      nullTime(lastPanic),
+		"last_success_at":    nullTime(lastSuccess),
+		"last_batch_at":      nullTime(lastBatchEnd),
+		"last_batch_msgs":    e.lastBatchMsgCnt.Load(),
+		"last_batch_duration": durationMillis(e.lastBatchDur.Load()),
 	}
 }
 
 func (e *RetryEngine) processRetries() {
+	start := time.Now()
+
 	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	defer cancel()
 
@@ -196,12 +238,19 @@ func (e *RetryEngine) processRetries() {
 	messages, err := e.queueRepo.GetRetryable(ctx, now, minDelay, e.batchSize)
 	if err != nil {
 		slog.Error("get retryable messages", "error", err)
+		e.recordBatchEnd(start, 0)
+		return
+	}
+	if len(messages) == 0 {
+		e.recordBatchEnd(start, 0)
 		return
 	}
 
+	processed := 0
 	for _, msg := range messages {
 		select {
 		case <-e.stopCh:
+			e.recordBatchEnd(start, processed)
 			return
 		default:
 		}
@@ -218,5 +267,18 @@ func (e *RetryEngine) processRetries() {
 			"attempt", msg.RetryCount+1,
 			"delay", requiredDelay,
 		)
+		processed++
+	}
+
+	e.recordBatchEnd(start, processed)
+}
+
+func (e *RetryEngine) recordBatchEnd(start time.Time, processed int) {
+	elapsed := time.Since(start)
+	e.lastBatchEndTime.Store(time.Now())
+	e.lastBatchMsgCnt.Store(int64(processed))
+	e.lastBatchDur.Store(elapsed.Nanoseconds())
+	if processed > 0 {
+		e.lastSuccessTime.Store(time.Now())
 	}
 }

@@ -19,6 +19,7 @@ type OutboxWorker struct {
 	eventBus     event.Bus
 	batchSize    int
 	pollInterval time.Duration
+	onRestart    func(RestartEvent)
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -28,14 +29,21 @@ type OutboxWorker struct {
 
 	running    atomic.Bool
 	restartCnt atomic.Int64
+
+	lastPanicTime    atomic.Value // time.Time
+	lastSuccessTime  atomic.Value // time.Time
+	lastBatchEndTime atomic.Value // time.Time
+	lastBatchMsgCnt  atomic.Int64
+	lastBatchDur     atomic.Int64
 }
 
 func NewOutboxWorker(
+	parentCtx context.Context,
 	outboxRepo domain.OutboxRepository,
 	eventBus event.Bus,
 	opts ...OutboxWorkerOption,
 ) *OutboxWorker {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	w := &OutboxWorker{
 		outboxRepo:   outboxRepo,
 		eventBus:     eventBus,
@@ -44,7 +52,11 @@ func NewOutboxWorker(
 		stopCh:       make(chan struct{}),
 		cancel:       cancel,
 		ctx:          ctx,
+		onRestart:    func(RestartEvent) {},
 	}
+	w.lastPanicTime.Store(time.Time{})
+	w.lastSuccessTime.Store(time.Time{})
+	w.lastBatchEndTime.Store(time.Time{})
 	for _, opt := range opts {
 		opt(w)
 	}
@@ -61,6 +73,10 @@ func OutboxWorkerWithPollInterval(d time.Duration) OutboxWorkerOption {
 	return func(w *OutboxWorker) { w.pollInterval = d }
 }
 
+func OutboxWorkerWithRestartCallback(fn func(RestartEvent)) OutboxWorkerOption {
+	return func(w *OutboxWorker) { w.onRestart = fn }
+}
+
 func (w *OutboxWorker) Start() {
 	w.running.Store(true)
 	w.wg.Add(1)
@@ -68,19 +84,36 @@ func (w *OutboxWorker) Start() {
 		defer w.wg.Done()
 		defer w.running.Store(false)
 		backoff := 100 * time.Millisecond
+		consecutiveFailures := 0
 		for {
 			if w.iteration() {
 				backoff = 100 * time.Millisecond
+				consecutiveFailures = 0
 				continue
 			}
 			select {
 			case <-w.stopCh:
 				return
 			default:
-				slog.Warn("outbox worker restarting",
+				consecutiveFailures++
+				critical := consecutiveFailures >= MaxConsecutiveRestarts
+				level := slog.LevelWarn
+				if critical {
+					level = slog.LevelError
+				}
+				slog.Log(w.ctx, level,
+					"outbox worker restarting",
 					"restart_count", w.restartCnt.Load(),
+					"consecutive_failures", consecutiveFailures,
 					"backoff_ms", backoff.Milliseconds(),
 				)
+				w.onRestart(RestartEvent{
+					WorkerType:           "outbox_worker",
+					RestartCount:        w.restartCnt.Load(),
+					ConsecutiveFailures: consecutiveFailures,
+					Backoff:             backoff,
+					Critical:            critical,
+				})
 				time.Sleep(backoff)
 				if backoff < 30*time.Second {
 					backoff *= 2
@@ -95,6 +128,7 @@ func (w *OutboxWorker) iteration() (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			w.restartCnt.Add(1)
+			w.lastPanicTime.Store(time.Now())
 			slog.Error("outbox worker panic recovered",
 				"panic", r,
 				"restart_count", w.restartCnt.Load(),
@@ -133,26 +167,45 @@ func (w *OutboxWorker) IsHealthy() error {
 }
 
 func (w *OutboxWorker) HealthDetail() map[string]interface{} {
+	var lastPanic, lastSuccess, lastBatchEnd time.Time
+	if v, ok := w.lastPanicTime.Load().(time.Time); ok {
+		lastPanic = v
+	}
+	if v, ok := w.lastSuccessTime.Load().(time.Time); ok {
+		lastSuccess = v
+	}
+	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok {
+		lastBatchEnd = v
+	}
 	return map[string]interface{}{
-		"alive":         w.running.Load(),
-		"stopped":       isClosed(w.stopCh),
-		"restart_count": w.restartCnt.Load(),
-		"batch_size":    w.batchSize,
-		"poll_interval": w.pollInterval.String(),
-		"type":          "outbox_worker",
+		"type":               "outbox_worker",
+		"alive":              w.running.Load(),
+		"stopped":            isClosed(w.stopCh),
+		"restart_count":      w.restartCnt.Load(),
+		"batch_size":         w.batchSize,
+		"poll_interval":      w.pollInterval.String(),
+		"last_panic_at":      nullTime(lastPanic),
+		"last_success_at":    nullTime(lastSuccess),
+		"last_batch_at":      nullTime(lastBatchEnd),
+		"last_batch_msgs":    w.lastBatchMsgCnt.Load(),
+		"last_batch_duration": durationMillis(w.lastBatchDur.Load()),
 	}
 }
 
 func (w *OutboxWorker) processBatch() {
+	start := time.Now()
+
 	ctx, cancel := context.WithTimeout(w.ctx, 10*time.Second)
 	defer cancel()
 
 	events, err := w.outboxRepo.GetPending(ctx, w.batchSize)
 	if err != nil {
 		slog.Error("get pending outbox events", "error", err)
+		w.recordBatchEnd(start, 0)
 		return
 	}
 	if len(events) == 0 {
+		w.recordBatchEnd(start, 0)
 		return
 	}
 
@@ -160,6 +213,7 @@ func (w *OutboxWorker) processBatch() {
 	for _, evt := range events {
 		select {
 		case <-w.stopCh:
+			w.recordBatchEnd(start, published)
 			return
 		default:
 		}
@@ -186,8 +240,16 @@ func (w *OutboxWorker) processBatch() {
 		published++
 	}
 
+	w.recordBatchEnd(start, published)
+}
+
+func (w *OutboxWorker) recordBatchEnd(start time.Time, published int) {
+	elapsed := time.Since(start)
+	w.lastBatchEndTime.Store(time.Now())
+	w.lastBatchMsgCnt.Store(int64(published))
+	w.lastBatchDur.Store(elapsed.Nanoseconds())
 	if published > 0 {
-		slog.Debug("outbox batch published", "count", published)
+		w.lastSuccessTime.Store(time.Now())
 	}
 }
 
