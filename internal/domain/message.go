@@ -125,10 +125,10 @@ type Sender interface {
 }
 
 // ============================================================
-// Worker Safety & Idempotency Notes
+// DESIGN NOTES (not yet implemented — for Phase 2.4)
 // ============================================================
 //
-// FOR UPDATE SKIP LOCKED:
+// FOR UPDATE SKIP LOCKED — DESIGNED, NOT YET IMPLEMENTED:
 // When multiple workers pull messages from the queue, use:
 //   BEGIN;
 //   SELECT id FROM messages WHERE status = 'queued'
@@ -138,12 +138,16 @@ type Sender interface {
 //   WHERE id = ANY($1);
 //   COMMIT;
 // This prevents two workers from picking the same message.
+// Will be implemented in the QueueWorker.
 //
-// Idempotency:
+// Idempotency — DESIGNED, NOT YET FULLY IMPLEMENTED:
 //   - ClientRef:  Unique per tenant, set by the API caller. Blocks duplicate submissions.
+//                 UNIQUE partial index in DB + check in service: ✅ done.
 //   - ExternalID: Unique per connector (SMSC message ID). Set when message is sent.
+//                 Lookup method exists in repo, dedup not yet enforced in worker.
 //   - DLR:        DLR updates must be idempotent — if a DLR arrives twice,
 //                 UpdateStatus should check the current status and skip if terminal.
+//                 DLR dedup logic will be in the DLRHandler.
 //   - ClientRef check is done BEFORE create (GetByClientRef).
 //   - ExternalID is set AFTER successful send.
 //   - DLR dedup: check if message is already 'delivered' or 'failed' before updating.
