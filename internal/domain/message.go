@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -90,13 +91,37 @@ type MessageFilter struct {
 // DLRRecord represents a delivery receipt log entry.
 type DLRRecord struct {
 	BaseModel
-	MessageID   string    `json:"message_id"`
-	TenantID    string    `json:"tenant_id"`
-	Status      DLRStatus `json:"status"`
-	ExternalID  string    `json:"external_id,omitempty"`
-	ErrorCode   string    `json:"error_code,omitempty"`
-	Description string    `json:"description,omitempty"`
-	RawResponse string    `json:"raw_response,omitempty"` // full DLR payload for debugging
+	MessageID     string    `json:"message_id"`
+	TenantID      string    `json:"tenant_id"`
+	Status        DLRStatus `json:"status"`
+	ExternalID    string    `json:"external_id,omitempty"`
+	ConnectorName string    `json:"connector_name,omitempty"`
+	RemoteIP      string    `json:"remote_ip,omitempty"`
+	Headers       []byte    `json:"headers,omitempty"`  // JSONB - DLR HTTP headers
+	RawPayload    []byte    `json:"raw_payload,omitempty"` // JSONB - full DLR payload
+	ErrorCode     string    `json:"error_code,omitempty"`
+	Description   string    `json:"description,omitempty"`
+	CreatedAt     time.Time `json:"received_at"` // when the DLR was received
+}
+
+// OutboxEvent represents an event waiting to be published (Outbox pattern).
+type OutboxEvent struct {
+	BaseModel
+	EventType string      `json:"event_type"`
+	TenantID  string      `json:"tenant_id,omitempty"`
+	Payload   []byte      `json:"payload"` // JSONB - serialized event payload
+	Status    string      `json:"status"`  // pending, published, failed
+	Attempts  int         `json:"attempts"`
+	LastError string      `json:"last_error,omitempty"`
+	PublishedAt *time.Time `json:"published_at,omitempty"`
+}
+
+// Sender defines the interface for sending messages through a connector.
+type Sender interface {
+	// Send sends a message and returns the external ID, parts count, and error.
+	Send(ctx context.Context, msg *Message) (externalID string, parts int, err error)
+	// Type returns the connector type this sender handles.
+	Type() ConnectorType
 }
 
 // ============================================================

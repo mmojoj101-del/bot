@@ -1,6 +1,10 @@
 package event
 
-import "time"
+import (
+	"time"
+
+	"github.com/raghna/fury-sms-gateway/internal/domain"
+)
 
 // Event represents a domain event.
 type Event struct {
@@ -49,13 +53,13 @@ const (
 	EventMessageFailed    = "message.failed"
 )
 
-// MessageEventPayload carries common fields for message events.
+// MessageEventPayload carries common fields for message events with typed status.
 type MessageEventPayload struct {
-	MessageID   string `json:"message_id"`
-	TenantID    string `json:"tenant_id"`
-	ClientID    string `json:"client_id"`
-	Status      string `json:"status"`
-	Source      string `json:"source"`
-	Destination string `json:"destination"`
-	ErrorCode   string `json:"error_code,omitempty"`
+	MessageID   string              `json:"message_id"`
+	TenantID    string              `json:"tenant_id"`
+	ClientID    string              `json:"client_id"`
+	Status      domain.MessageStatus `json:"status"`
+	Source      string              `json:"source"`
+	Destination string              `json:"destination"`
+	ErrorCode   string              `json:"error_code,omitempty"`
 }

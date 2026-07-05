@@ -1,6 +1,9 @@
 package domain
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // TxManager manages database transactions.
 type TxManager interface {
@@ -86,6 +89,15 @@ type MessageRepository interface {
 	List(ctx context.Context, filter MessageFilter) (PageResult[Message], error)
 	Count(ctx context.Context, filter MessageFilter) (int64, error)
 	Delete(ctx context.Context, id string) error
+}
+
+// OutboxRepository defines the interface for outbox event persistence.
+type OutboxRepository interface {
+	Create(ctx context.Context, event *OutboxEvent) error
+	GetPending(ctx context.Context, limit int) ([]OutboxEvent, error)
+	MarkPublished(ctx context.Context, id string) error
+	MarkFailed(ctx context.Context, id string, errMsg string) error
+	DeletePublished(ctx context.Context, before time.Time) error
 }
 
 // AuditLogRepository defines the interface for audit log persistence.

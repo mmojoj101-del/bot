@@ -199,10 +199,12 @@ func (r *MessageRepository) AppendDLR(ctx context.Context, dlr *domain.DLRRecord
 
 	q := r.getQuerier(ctx)
 	_, err := q.Exec(ctx,
-		`INSERT INTO dlr_logs (message_id, tenant_id, status, external_id, error_code, description, raw_response)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+		`INSERT INTO dlr_logs (message_id, tenant_id, status, external_id, connector_name, remote_ip, headers, raw_payload, error_code, description)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10)`,
 		dlr.MessageID, dlr.TenantID, dlr.Status, nullableString(&dlr.ExternalID),
-		nullableString(&dlr.ErrorCode), nullableString(&dlr.Description), dlr.RawResponse,
+		nullableString(&dlr.ConnectorName), nullableString(&dlr.RemoteIP),
+		dlr.Headers, dlr.RawPayload,
+		nullableString(&dlr.ErrorCode), nullableString(&dlr.Description),
 	)
 	return err
 }
