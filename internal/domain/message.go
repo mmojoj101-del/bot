@@ -149,6 +149,32 @@ type Sender interface {
 //   - DLR dedup: check if message is already 'delivered' or 'failed' before updating.
 
 // ============================================================
+// Architectural Separation: Message Queue vs Outbox Events
+// ============================================================
+//
+// Two independent queues serve different purposes:
+//
+// 1. MESSAGE QUEUE (messages table with status = 'queued'):
+//    - Messages waiting to be SENT through a connector.
+//    - Worker pulls via FOR UPDATE SKIP LOCKED, calls Sender.Send().
+//    - After send: status → 'sent'/'failed', writes to outbox_events.
+//    - NOT processed through outbox_events.
+//
+// 2. OUTBOX EVENTS (outbox_events table):
+//    - Domain events published AFTER an action completes.
+//    - Examples: MessageSent, MessageDelivered, MessageFailed.
+//    - A separate Outbox Worker reads and publishes to eventBus
+//      so in-process subscribers (analytics, audit, billing) react.
+//    - NOT used to trigger sending; purely event propagation.
+//
+// Flow:
+//   Worker → SELECT FROM messages WHERE status='queued' SKIP LOCKED
+//         → Sender.Send()
+//         → UPDATE messages SET status='sent'
+//         → INSERT INTO outbox_events (event_type='message.sent')
+//         → Outbox Worker → eventBus.Publish() → subscribers
+//
+// ============================================================
 // Message State Machine
 // ============================================================
 
