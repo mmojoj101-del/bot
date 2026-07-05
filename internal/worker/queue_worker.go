@@ -12,6 +12,9 @@ import (
 	"github.com/raghna/fury-sms-gateway/internal/event"
 )
 
+// MaxConsecutiveRestarts is the threshold after which a CRITICAL log is emitted.
+const MaxConsecutiveRestarts = 10
+
 // QueueWorker pulls queued messages and sends them through the appropriate connector.
 type QueueWorker struct {
 	queueRepo  domain.QueueRepository
@@ -90,9 +93,11 @@ func (w *QueueWorker) Start() {
 		defer w.wg.Done()
 		defer w.running.Store(false)
 		backoff := 100 * time.Millisecond
+		consecutiveFailures := 0
 		for {
 			if w.iteration() {
 				backoff = 100 * time.Millisecond // reset on success
+				consecutiveFailures = 0
 				continue
 			}
 			// iteration returned false — check if we should stop or restart
@@ -100,14 +105,20 @@ func (w *QueueWorker) Start() {
 			case <-w.stopCh:
 				return
 			default:
-				// Restart after panic
-				slog.Warn("queue worker restarting",
+				consecutiveFailures++
+				level := slog.LevelWarn
+				if consecutiveFailures >= MaxConsecutiveRestarts {
+					level = slog.LevelError
+				}
+				slog.Log(context.Background(), level,
+					"queue worker restarting",
 					"restart_count", w.restartCnt.Load(),
+					"consecutive_failures", consecutiveFailures,
 					"backoff_ms", backoff.Milliseconds(),
 				)
 				time.Sleep(backoff)
 				if backoff < 30*time.Second {
-					backoff *= 2 // exponential backoff: 100ms → 200ms → 400ms → ...
+					backoff *= 2 // exponential: 100ms → 200ms → 400ms → ... → 30s
 				}
 			}
 		}

@@ -102,17 +102,26 @@ func (e *RetryEngine) Start() {
 		defer e.wg.Done()
 		defer e.running.Store(false)
 		backoff := 100 * time.Millisecond
+		consecutiveFailures := 0
 		for {
 			if e.iteration() {
 				backoff = 100 * time.Millisecond
+				consecutiveFailures = 0
 				continue
 			}
 			select {
 			case <-e.stopCh:
 				return
 			default:
-				slog.Warn("retry engine restarting",
+				consecutiveFailures++
+				level := slog.LevelWarn
+				if consecutiveFailures >= MaxConsecutiveRestarts {
+					level = slog.LevelError
+				}
+				slog.Log(context.Background(), level,
+					"retry engine restarting",
 					"restart_count", e.restartCnt.Load(),
+					"consecutive_failures", consecutiveFailures,
 					"backoff_ms", backoff.Milliseconds(),
 				)
 				time.Sleep(backoff)
