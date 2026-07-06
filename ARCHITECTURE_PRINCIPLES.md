@@ -13,6 +13,210 @@ Every decision in Phase 2.5 must pave the way for Phases 2.6–3.
 
 ---
 
+## 🎯 Event-Driven Core (Not Worker-Driven)
+
+The platform is **Event-Driven**, not Worker-Driven.  
+The Worker is just an **Executor** — the real engine is Domain Events.
+
+### The Shift
+
+```
+❌ Worker-Driven (old mindset):
+   Worker → Route → Send → Update DB → Audit → Metrics → Webhook
+
+✅ Event-Driven (platform mindset):
+   Worker → Publish(MessageSent)
+              ├── AuditSubscriber    (logs the event)
+              ├── BillingSubscriber  (deducts credits)
+              ├── MetricsSubscriber  (records latency)
+              ├── WebhookSubscriber  (calls customer callback)
+              ├── AnalyticsSubscriber(stores for dashboard)
+              └── ...any future feature = new subscriber
+```
+
+### Every Step is an Event
+
+Instead of a monolithic Worker calling services, each lifecycle step produces a **Domain Event**:
+
+```
+MessageQueued
+  │ ▼ Queue Worker claims
+MessageClaimed
+  │ ▼ Routing completed
+RoutingCompleted  ← includes the immutable RoutingDecision
+  │ ▼ Connector selected
+ConnectorSelected
+  │ ▼ Send started
+SendStarted
+  │ ▼ Send completed (success or failure)
+SendSucceeded | SendFailed
+  │ ▼ Delivery report received (may be minutes later)
+DeliveryReportReceived  → MessageDelivered | MessageFailed
+  │ ▼ Retry path
+RetryScheduled
+  │ ▼ Terminal state
+MessageCompleted
+```
+
+### Worker Does Not Call Services — It Publishes Events
+
+```go
+// ❌ Bad: Worker calls services directly
+func (w *Worker) process(msg *Message) {
+    w.routeService.Select(ctx, msg)      // tight coupling
+    w.billingService.Deduct(ctx, msg)     // worker knows about billing
+    w.auditService.Log(ctx, msg)          // worker knows about audit
+    w.metricsService.Record(ctx, msg)     // worker knows about metrics
+}
+
+// ✅ Good: Worker publishes events, subscribers react
+func (w *Worker) process(msg *Message) {
+    result, err := w.connector.Send(ctx, msg)
+    if err != nil {
+        w.eventBus.Publish(ctx, MessageFailed{MessageID: msg.ID, Error: err})
+        return
+    }
+    w.eventBus.Publish(ctx, MessageSent{MessageID: msg.ID, ExternalID: result.ExternalID})
+    // That's it. Subscribers handle audit, billing, metrics, webhooks.
+}
+```
+
+Adding a new feature = writing a new subscriber. **The Worker never changes.**
+
+### Domain Events vs Infrastructure Events
+
+These are **separate concerns** with separate event channels:
+
+| Domain Events (Business) | Infrastructure Events (Operations) |
+|--------------------------|-----------------------------------|
+| `MessageQueued` | `WorkerStarted` |
+| `MessageClaimed` | `WorkerStopped` |
+| `MessageSent` | `DBReconnected` |
+| `MessageDelivered` | `RedisUnavailable` |
+| `MessageFailed` | `CircuitBreakerOpened` |
+| `ConnectorUnavailable` | `CircuitBreakerHalfOpened` |
+| `RouteSelected` | `CircuitBreakerClosed` |
+| `RetryScheduled` | `ConnectorHealthChanged` |
+| `Expired` | `QueueDepthAlert` |
+
+- **Domain Events** → published on `eventBus.Bus` (in-process or NATS/Kafka)
+- **Infrastructure Events** → logged + metrics, optionally alert (PagerDuty/Prometheus Alertmanager)
+
+### Single Centralized State Machine
+
+There is **one** state machine for the entire platform. All Connectors map their results to it:
+
+```
+Created → Queued → Claimed → Routing → Prepared → Sending → Sent → WaitingDLR → Delivered
+                                                                                → Failed
+                                     → Failed (reject before send)
+                                     → Retrying → Queued (loop)
+                                     → Expired (max retries exceeded)
+                                     → Cancelled (admin action)
+```
+
+Every Connector translates its protocol-specific result to this canonical state:
+- HTTP 200 → `Sent`
+- SMPP submit_sm_resp → `Sent`
+- SMPP deliver_sm (DELIVRD) → `Delivered`
+- SIP 200 OK (INVITE) → `Sent`
+- Provider error → `Failed` with error code
+- Timeout → `Retrying`
+
+### Retry Policy is Independent
+
+Retry is **Business Logic**, not Protocol Logic. It does not live inside Connectors:
+
+```
+Connector.Send() → SendResult{Success, ErrorCode}
+                          ↓
+                   RetryEngine.Decide(result, attempt, maxRetries)
+                          ↓
+              ┌─── Retry ───┴─── Terminal Failure ───┐
+              ↓                                       ↓
+        Publish(RetryScheduled)              Publish(MessageFailed)
+```
+
+Retry policy can differ per tenant, per route, per message priority — without touching Connectors.
+
+### RoutingDecision is Immutable
+
+Once the Routing Engine selects a connector, the full decision is recorded as an **immutable value object**:
+
+```go
+type RoutingDecision struct {
+    RouteID         string
+    ConnectorID     string
+    StrategyUsed    string        // static, round_robin, failover, weighted
+    Priority        int
+    Cost            int64         // at selection time (thousandths of a cent)
+    Reason          string        // why this route was chosen
+    CapabilitiesUsed []string     // which capabilities were matched
+    SelectedAt      time.Time
+}
+```
+
+This is critical for:
+- **Audit**: know exactly why a message went through a specific connector
+- **Diagnostics**: trace routing decisions when debugging delivery issues
+- **Billing**: record the cost at routing time (not send time)
+- **Analytics**: understand routing patterns over time
+
+### Capability-Based Routing
+
+The Routing Engine doesn't match "Route A" vs "Route B". It matches **message requirements** against **connector capabilities**:
+
+```
+Message Requirements:
+  • Unicode: true (text contains non-GSM7 chars)
+  • DLR: true (requested delivery receipt)
+  • Multipart: false (fits in single SMS)
+  • Session: not required
+  • Priority: high
+        ↓
+  Routing Engine matches against connector Capabilities
+        ↓
+  Returns: {ConnectorID: "...", Reason: "supports Unicode + DLR", CapabilitiesUsed: ["unicode", "dlr"]}
+```
+
+This means:
+- Adding a new connector = it advertises its capabilities
+- The Routing Engine automatically considers it for matching messages
+- No routing rules need to be updated manually
+- Messages that can't be satisfied by any connector → `MessageFailed` with `"no_suitable_connector"`
+
+### Compatibility Rule
+
+**Every commit must pass this test:**
+
+> If we add Protocol X tomorrow (not HTTP, not SMPP, not SIP), would we need to modify the Worker or Core?
+
+If the answer is **yes**, the architecture needs review before committing.
+
+Examples of Protocol X: WhatsApp Business API, Apple Push Notification, Telegram Bot API, XMPP, Amazon SNS, custom WebSocket protocol.
+
+### Testing Philosophy
+
+```
+70%  Unit Tests      — each component in isolation with mocks
+20%  Integration Tests — real DB + real event bus + mocked connectors
+10%  End-to-End Tests  — full Docker stack, API → Queue → Worker → Connector → DLR
+```
+
+**Mock every interface in the Core.**
+If a component can't be unit-tested with mocks, it has a design problem.
+
+### Definition of Success — Phase 2.5
+
+> The Worker becomes a **generic component** that knows nothing about any protocol or provider.
+> It can be used as-is with **any new Connector** that implements the defined interfaces.
+> New platform features (billing, rate limiting, compliance) are added as **event subscribers** — no Worker changes.
+> New routing strategies are added as **new strategy files** — no Worker or Connector changes.
+
+When this is true, you've built the foundation for a **Communications Platform**, not just an SMS Gateway.
+
+---
+
 ## 🔐 Hard Constraints
 
 ### 1. Protocol Agnostic Worker
@@ -314,7 +518,7 @@ After completing each Phase, perform a structured review:
 - Can a new provider be added without modifying this component?
 - Can a new routing strategy be added without modifying this component?
 
-### 5. Architecture Test — 7 Questions
+### 5. Architecture Test — 8 Questions
 Before declaring any Phase "Done", ask:
 
 | # | Question | Pass Condition |
@@ -322,12 +526,13 @@ Before declaring any Phase "Done", ask:
 | 1 | Can a new protocol be added without modifying the Worker? | Yes → new package only |
 | 2 | Can a new provider be added without modifying the Routing Engine? | Yes → adapter only |
 | 3 | Can a new routing strategy be added without modifying any Connector? | Yes → new file only |
-| 4 | Can a new feature (Billing, Rate Limiting) be a pipeline stage only? | Yes → hook/stage only |
+| 4 | Can a new feature (Billing, Rate Limiting, Compliance) be added as an event subscriber or pipeline stage without touching the Worker? | Yes → subscriber/stage only |
 | 5 | Can every component be tested in isolation using Mocks? | Yes → interface-injected |
 | 6 | Can any single Connector be removed without affecting the rest? | Yes → registry pattern |
 | 7 | Can the system scale horizontally without local assumptions? | Yes → no in-memory state that can't be rebuilt |
+| 8 | **Compatibility Rule**: If Protocol X is added tomorrow, would the Worker or Core need changes? | **No** → architecture is sound. If Yes → redesign needed. |
 
-**If any answer is "No", the architecture needs adjustment before proceeding.**
+**If any answer violates the pass condition, the architecture needs adjustment before proceeding.**
 
 ### 6. Required Checks
 ```bash

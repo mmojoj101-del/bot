@@ -86,47 +86,82 @@
 
 ## 📋 Phase 2.5 — Worker Engine
 
-**Goal**: Production-grade worker responsible for the full message lifecycle — from claiming to delivery/retry. Protocol-agnostic, pluggable, observable.
+**Goal**: Event-Driven pipeline that executes the message lifecycle — from claiming to delivery/retry — by producing Domain Events at every step. Protocol-agnostic, pluggable, observable.
 
-### Scope of Responsibility
-The Worker Engine is the brain of the platform. It handles:
-- **Claim** messages safely from queue (`FOR UPDATE SKIP LOCKED`)
-- **Route selection** — asks Routing Engine (Phase 2.6): "which route + connector for this message?"
-- **Connector selection** — receives `ConnectorID` from Routing Engine
-- **Execute send** — passes message to the chosen `Connector` (Phase 2.7+)
-- **Retry policies** — exponential backoff with jitter, max retry limit
-- **Idempotency** — no double-send guarantees
-- **Status state machine** — `ValidateTransition()` enforced
-- **Audit logs** — every state change logged
-- **Metrics** — Prometheus counters/histograms per worker
-- **Events** — publish lifecycle events (sent, failed, delivered, etc.)
-- **Graceful shutdown** — WaitGroup drain + context cancellation
-- **Panic recovery** — loop+recover with exponential restart backoff
-- **Context cancellation** — all operations cancellable from parent
+### Core Design: Event-Driven, Not Worker-Driven
+
+The Worker is an **Executor**, not an Orchestrator. It:
+1. Claims a message from the queue
+2. Publishes `MessageClaimed`
+3. Runs the message through a **Pipeline of Stages** (each stage is a pluggable component)
+4. Publishes a Domain Event after each stage (`RoutingCompleted`, `SendStarted`, `SendSucceeded`, `SendFailed`, etc.)
+5. **Does NOT** call services directly — subscribers handle audit, billing, metrics, webhooks
+
+```
+Worker executes → publishes Domain Event → subscribers react
+                                              ├── AuditSubscriber
+                                              ├── BillingSubscriber
+                                              ├── MetricsSubscriber
+                                              ├── WebhookSubscriber
+                                              └── AnalyticsSubscriber
+```
+
+### Pipeline Stages
+
+```
+Claim → Validate → Route → Prepare → Send → HandleResult → Complete
+```
+
+Each stage:
+- Implements `Stage { Name(), Process(ctx, msg) }`
+- Is independent and testable in isolation
+- Can be added/removed/reordered without touching other stages
+- Produces a Domain Event on completion
+
+New platform features (Rate Limiting, Billing, Fraud Detection) = new pipeline stages or new event subscribers — **zero Worker changes**.
+
+### What the Worker Does (and Doesn't Do)
+
+| Responsibility | Worker? | Who? |
+|---------------|---------|------|
+| Claim from queue | ✅ Yes | Pipeline Stage |
+| Route selection | ❌ No | Routing Engine (Phase 2.6) — Worker asks, gets answer |
+| Execute send | ✅ Yes | Pipeline Stage → calls `Connector.Send()` |
+| Retry decision | ❌ No | RetryEngine — Worker publishes `SendFailed`, RetryEngine subscriber decides |
+| Audit logging | ❌ No | AuditSubscriber — reacts to Domain Events |
+| Billing | ❌ No | BillingSubscriber — reacts to Domain Events |
+| Metrics | ❌ No | MetricsSubscriber — reacts to Domain Events |
+| Webhook notifications | ❌ No | WebhookSubscriber — reacts to Domain Events |
+| State machine update | ✅ Yes | Pipeline Stage — calls repository |
+| Event publishing | ✅ Yes | After each stage, publishes Domain Event |
 
 ### Architecture Rules
 - **No protocol coupling**: Worker must NOT know HTTP, SMPP, or SIP details
 - **Uses `Connector` interface**: `Send(ctx, req) → (*SendResult, error)`
 - **Uses `RoutingEngine` interface**: `Select(ctx, msg) → (*RouteDecision, error)`
+- **Domain Events only**: Worker publishes events, never calls services directly
 - **Repository Pattern** for DB access
 - **Dependency Injection** for all components
 - **100% unit test coverage** on critical paths (claim → send → ack → retry)
 - **Integration test** with real PostgreSQL + mock connector
 
-### Status Flow Through the Worker
+### Status Flow Through the Pipeline
 
 ```
-accepted → queued → sending → sent → delivered  (success path)
-                               → failed          (terminal failure)
-                               → queued          (retry path, repeats up to MaxRetries)
+Created → Queued → Claimed → Routing → Prepared → Sending → Sent → WaitingDLR → Delivered
+                                                                                → Failed
+                                     → Failed (reject before send)
+                                     → Retrying → Queued (loop)
+                                     → Expired (max retries exceeded)
 ```
 
 ### After Phase 2.5
 - `go build ./...` ✅
 - `go test ./...` ✅
 - `go test -race ./...` (if on Linux/WSL) ✅
-- Docker smoke test (create message → worker claims → sends via mock → DLR → delivered) ✅
-- Written report with decisions, design rationale, and any technical debt
+- Docker smoke test (create message → worker claims → pipeline executes → events published → DLR → delivered) ✅
+- Written report with decisions, design rationale, and 8-question architecture test results ✅
+- **Compatibility Rule** verified: "If Protocol X is added tomorrow, does the Worker change?" → **No** ✅
 
 ---
 
