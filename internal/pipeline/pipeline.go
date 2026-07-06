@@ -35,7 +35,9 @@ func (p *Pipeline) Execute(ctx context.Context, state *PipelineState) error {
 		var err error
 		state, err = stage.Process(ctx, state)
 		if err != nil {
-			state.Error = err
+			if state != nil {
+				state.Error = err
+			}
 			return fmt.Errorf("pipeline: stage %q failed: %w", stage.Name(), err)
 		}
 		if state == nil {
