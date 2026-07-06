@@ -121,6 +121,16 @@ type SendRequest struct {
 	Message   *Message
 	Connector *Connector
 	Timeout   time.Duration
+
+	// Encoding is the detected message encoding ("GSM7" or "UCS2").
+	// Set by the pipeline's PrepareStage; the sender uses this instead of
+	// re-deriving it from the message text.
+	Encoding string
+
+	// Parts is the number of SMS parts after splitting.
+	// Set by the pipeline's PrepareStage; the sender uses this instead of
+	// re-counting from the message text.
+	Parts int
 }
 
 // SendResult carries the outcome of a send attempt.

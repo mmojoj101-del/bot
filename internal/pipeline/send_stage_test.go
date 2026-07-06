@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
 
 // routedState creates a PipelineState with Decision and SendRequest populated.
@@ -29,38 +31,42 @@ func routedState() *PipelineState {
 	return state
 }
 
-// mockConnector implements Connector for testing.
-type mockConnector struct {
-	result *SendResult
+// mockSender implements domain.Sender for testing.
+type mockSender struct {
+	result *domain.SendResult
 	err    error
 }
 
-func (m *mockConnector) Send(_ context.Context, _ *SendRequest) (*SendResult, error) {
+func (m *mockSender) Type() domain.ConnectorType {
+	return domain.ConnectorTypeHTTPClient
+}
+
+func (m *mockSender) Send(_ context.Context, _ domain.SendRequest) (*domain.SendResult, error) {
 	return m.result, m.err
 }
 
 // mockRegistry implements ConnectorRegistry for testing.
 type mockRegistry struct {
-	connectors map[string]Connector
-	err        error
+	senders map[string]domain.Sender
+	err     error
 }
 
-func (m *mockRegistry) Get(_ context.Context, id string) (Connector, error) {
+func (m *mockRegistry) Resolve(_ context.Context, id string) (domain.Sender, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
-	c, ok := m.connectors[id]
+	s, ok := m.senders[id]
 	if !ok {
 		return nil, errors.New("connector not found")
 	}
-	return c, nil
+	return s, nil
 }
 
 func TestSendStage_Success(t *testing.T) {
 	reg := &mockRegistry{
-		connectors: map[string]Connector{
-			"connector-http-1": &mockConnector{
-				result: &SendResult{Success: true, ExternalID: "ext-123", Parts: 1},
+		senders: map[string]domain.Sender{
+			"connector-http-1": &mockSender{
+				result: &domain.SendResult{ExternalID: "ext-123", Parts: 1},
 			},
 		},
 	}
@@ -84,8 +90,8 @@ func TestSendStage_Success(t *testing.T) {
 
 func TestSendStage_ConnectorError(t *testing.T) {
 	reg := &mockRegistry{
-		connectors: map[string]Connector{
-			"connector-http-1": &mockConnector{
+		senders: map[string]domain.Sender{
+			"connector-http-1": &mockSender{
 				err: errors.New("provider timeout"),
 			},
 		},
@@ -104,7 +110,7 @@ func TestSendStage_ConnectorError(t *testing.T) {
 
 func TestSendStage_ConnectorNotFound(t *testing.T) {
 	reg := &mockRegistry{
-		connectors: map[string]Connector{}, // empty
+		senders: map[string]domain.Sender{}, // empty
 	}
 	stage := NewSendStage(reg)
 	state := routedState()
@@ -128,8 +134,8 @@ func TestSendStage_NoDecision(t *testing.T) {
 
 func TestSendStage_NoSendRequest(t *testing.T) {
 	reg := &mockRegistry{
-		connectors: map[string]Connector{
-			"connector-http-1": &mockConnector{result: &SendResult{Success: true}},
+		senders: map[string]domain.Sender{
+			"connector-http-1": &mockSender{result: &domain.SendResult{ExternalID: "ext"}},
 		},
 	}
 	stage := NewSendStage(reg)
@@ -163,9 +169,9 @@ func TestPipeline_FullSequence(t *testing.T) {
 			},
 		}),
 		NewSendStage(&mockRegistry{
-			connectors: map[string]Connector{
-				"connector-http-1": &mockConnector{
-					result: &SendResult{Success: true, ExternalID: "ext-456", Parts: 1},
+			senders: map[string]domain.Sender{
+				"connector-http-1": &mockSender{
+					result: &domain.SendResult{ExternalID: "ext-456", Parts: 1},
 				},
 			},
 		}),
@@ -213,8 +219,8 @@ func TestPipeline_FullSequence_SendFails(t *testing.T) {
 			},
 		}),
 		NewSendStage(&mockRegistry{
-			connectors: map[string]Connector{
-				"connector-http-1": &mockConnector{
+			senders: map[string]domain.Sender{
+				"connector-http-1": &mockSender{
 					err: errors.New("provider returned 500"),
 				},
 			},
@@ -234,7 +240,6 @@ func TestPipeline_FullSequence_SendFails(t *testing.T) {
 	if state.Decision == nil {
 		t.Fatal("expected Decision even on failure")
 	}
-	// SendResult should be nil since send failed
 	if state.SendResult != nil {
 		t.Fatal("expected no SendResult when send fails")
 	}

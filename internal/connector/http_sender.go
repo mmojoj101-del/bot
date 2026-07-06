@@ -82,8 +82,14 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		return nil, fmt.Errorf("parse connector config: %w", err)
 	}
 
+	// Determine encoding from SendRequest (set by pipeline) or message
+	encoding := req.Encoding
+	if encoding == "" {
+		encoding = string(req.Message.Encoding)
+	}
+
 	// Build request body from cached template
-	body, err := s.buildBody(cfg.BodyTemplate, req.Message)
+	body, err := s.buildBody(cfg.BodyTemplate, req.Message, encoding)
 	if err != nil {
 		return nil, fmt.Errorf("build request body: %w", err)
 	}
@@ -174,8 +180,11 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 	externalID := extractField(respBody, cfg.ExternalIDPath)
 	providerStatus := extractField(respBody, cfg.StatusPath)
 
-	// Calculate parts
-	parts := countSMSParts(req.Message.Text, req.Message.Encoding)
+	// Use pre-calculated parts from pipeline, or fall back to counting
+	parts := req.Parts
+	if parts <= 0 {
+		parts = countSMSParts(req.Message.Text, req.Message.Encoding)
+	}
 	price := int64(parts) * 5000 // placeholder: 0.05 per part
 
 	return &domain.SendResult{
@@ -189,13 +198,19 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 }
 
 // buildBody uses a cached template to avoid re-parsing on every send.
-func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message) ([]byte, error) {
+func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message, encoding string) ([]byte, error) {
+	// Convert string encoding to domain type for template data
+	domainEncoding := msg.Encoding
+	if encoding != "" {
+		domainEncoding = domain.Encoding(encoding)
+	}
+
 	if tmpl == "" {
 		return json.Marshal(map[string]interface{}{
 			"source":      msg.Source,
 			"destination": msg.Destination,
 			"text":        msg.Text,
-			"encoding":    msg.Encoding,
+			"encoding":    domainEncoding,
 			"client_ref":  msg.ClientRef,
 		})
 	}
@@ -215,8 +230,8 @@ func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message) ([]byte, error)
 		"Source":      msg.Source,
 		"Destination": msg.Destination,
 		"Text":        msg.Text,
-		"Parts":       countSMSParts(msg.Text, msg.Encoding),
-		"Encoding":    msg.Encoding,
+		"Parts":       countSMSParts(msg.Text, domainEncoding),
+		"Encoding":    domainEncoding,
 		"ClientRef":   msg.ClientRef,
 		"MessageID":   msg.ID,
 		"TenantID":    msg.TenantID,

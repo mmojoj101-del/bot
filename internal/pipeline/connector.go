@@ -1,17 +1,14 @@
 package pipeline
 
-import "context"
+import (
+	"context"
 
-// Connector sends a message through a specific provider.
-// It receives SendRequest (not PipelineState, not domain.Message).
-// Implementations wrap domain.Sender, protocol adapters, or mock connectors.
-type Connector interface {
-	Send(ctx context.Context, req *SendRequest) (*SendResult, error)
-}
+	"github.com/raghna/fury-sms-gateway/internal/domain"
+)
 
-// ConnectorRegistry resolves a connector ID to a Connector instance.
-// The implementation may return a cached instance or create one on demand.
-// Returns an error if the connector is not found or not ready.
+// ConnectorRegistry resolves a connector ID to a domain.Sender.
+// The implementation handles caching, lifecycle, and initialization.
+// The pipeline never knows how the registry works internally.
 type ConnectorRegistry interface {
-	Get(ctx context.Context, connectorID string) (Connector, error)
+	Resolve(ctx context.Context, connectorID string) (domain.Sender, error)
 }
