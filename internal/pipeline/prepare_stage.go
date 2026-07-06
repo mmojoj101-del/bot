@@ -5,27 +5,39 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
 
-// GSM-7 character set detection.
+// GSM-7 character set — O(1) lookup map.
 // Basic GSM 03.38 7-bit default alphabet characters.
-// Characters outside this set require UCS-2 encoding.
-const gsm7Chars = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
+var gsm7Chars = map[rune]struct{}{
+	'@': {}, '£': {}, '$': {}, '¥': {}, 'è': {}, 'é': {}, 'ù': {}, 'ì': {}, 'ò': {}, 'Ç': {},
+	'\n': {}, 'Ø': {}, 'ø': {}, '\r': {}, 'Å': {}, 'å': {}, 'Δ': {}, '_': {}, 'Φ': {}, 'Γ': {},
+	'Λ': {}, 'Ω': {}, 'Π': {}, 'Ψ': {}, 'Σ': {}, 'Θ': {}, 'Ξ': {}, '\x1b': {}, 'Æ': {}, 'æ': {},
+	'ß': {}, 'É': {}, ' ': {}, '!': {}, '"': {}, '#': {}, '¤': {}, '%': {}, '&': {}, '\'': {},
+	'(': {}, ')': {}, '*': {}, '+': {}, ',': {}, '-': {}, '.': {}, '/': {}, '0': {}, '1': {},
+	'2': {}, '3': {}, '4': {}, '5': {}, '6': {}, '7': {}, '8': {}, '9': {}, ':': {}, ';': {},
+	'<': {}, '=': {}, '>': {}, '?': {}, '¡': {}, 'A': {}, 'B': {}, 'C': {}, 'D': {}, 'E': {},
+	'F': {}, 'G': {}, 'H': {}, 'I': {}, 'J': {}, 'K': {}, 'L': {}, 'M': {}, 'N': {}, 'O': {},
+	'P': {}, 'Q': {}, 'R': {}, 'S': {}, 'T': {}, 'U': {}, 'V': {}, 'W': {}, 'X': {}, 'Y': {},
+	'Z': {}, 'Ä': {}, 'Ö': {}, 'Ñ': {}, 'Ü': {}, '§': {}, '¿': {}, 'a': {}, 'b': {}, 'c': {},
+	'd': {}, 'e': {}, 'f': {}, 'g': {}, 'h': {}, 'i': {}, 'j': {}, 'k': {}, 'l': {}, 'm': {},
+	'n': {}, 'o': {}, 'p': {}, 'q': {}, 'r': {}, 's': {}, 't': {}, 'u': {}, 'v': {}, 'w': {},
+	'x': {}, 'y': {}, 'z': {}, 'ä': {}, 'ö': {}, 'ñ': {}, 'ü': {}, 'à': {},
+}
 
-// Basic GSM-7 extension table characters (require escape prefix 0x1B).
-var gsm7ExtChars = map[rune]bool{
-	'\f': true, // form feed
-	'^':  true,
-	'{':  true,
-	'}':  true,
-	'\\': true,
-	'[':  true,
-	'~':  true,
-	']':  true,
-	'|':  true,
-	'€':  true,
+// gsm7ExtensionChars — GSM-7 extension characters that count as 2 chars.
+// These require the escape prefix (0x1B) before the actual character encoding.
+var gsm7ExtensionChars = map[rune]struct{}{
+	'\f': {}, // form feed
+	'^':  {},
+	'{':  {},
+	'}':  {},
+	'\\': {},
+	'[':  {},
+	'~':  {},
+	']':  {},
+	'|':  {},
+	'€':  {},
 }
 
 const (
@@ -57,6 +69,7 @@ var (
 //   - Calculate SMS part count
 //   - Fill SendRequest on PipelineState
 //
+// It does NOT mutate domain.Message — all derived values go into SendRequest.
 // No I/O, no routing, no pricing, no database access.
 type PrepareStage struct{}
 
@@ -70,11 +83,13 @@ func (s *PrepareStage) Name() string {
 	return "prepare"
 }
 
-// Process normalizes the message and fills derived fields.
+// Process normalizes the message and fills derived fields into SendRequest.
+// The domain.Message is NOT mutated (except Destination normalization which
+// is a lightweight formatting change, not a domain state change).
 func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	msg := state.Message
 
-	// 1. Normalize destination to E.164-like format (strip non-digits, ensure leading +)
+	// 1. Normalize destination to E.164-like format (strip non-digits, ensure +)
 	dest := normalizePhone(msg.Destination)
 	if dest == "" {
 		return nil, fmt.Errorf("%w: %q after normalization", ErrInvalidDestination, msg.Destination)
@@ -87,14 +102,10 @@ func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 		return nil, fmt.Errorf("%w: %v", ErrInvalidEncoding, err)
 	}
 
-	// 3. Calculate number of SMS parts
+	// 3. Calculate number of SMS parts (GSM-7 extension chars count as 2)
 	parts := calculateParts(msg.Text, encoding)
 
-	// 4. Update message fields
-	msg.Encoding = domain.Encoding(encoding)
-	msg.Parts = parts
-
-	// 5. Fill SendRequest for downstream stages
+	// 4. Fill SendRequest for downstream stages — NOT the domain.Message
 	state.SendRequest = &SendRequest{
 		MessageID:   msg.ID,
 		Source:      msg.Source,
@@ -107,13 +118,12 @@ func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 	return state, nil
 }
 
-// normalizePhone strips non-digit characters and ensures E.164-like format.
-// Examples:
+// normalizePhone strips non-digit characters and ensures leading +.
+// This is formatting, not E.164 validation. Full validation is a separate stage.
 //
 //	"+1 (234) 567-8900" → "+12345678900"
-//	"1234567890"        → "+1234567890" (if no +, assumes leading digit)
+//	"1234567890"        → "+1234567890"
 func normalizePhone(phone string) string {
-	// Strip all non-digit, non-plus characters
 	var b strings.Builder
 	b.Grow(len(phone) + 1)
 
@@ -133,11 +143,9 @@ func normalizePhone(phone string) string {
 		return ""
 	}
 
-	// Ensure leading +
 	if result[0] != '+' {
 		result = "+" + result
 	}
-
 	return result
 }
 
@@ -159,26 +167,39 @@ func detectEncoding(text string) (string, error) {
 // isGSM7 checks if a rune belongs to the GSM 03.38 7-bit alphabet
 // (including extension characters).
 func isGSM7(r rune) bool {
-	// Check extension table first
-	if gsm7ExtChars[r] {
+	if _, ok := gsm7ExtensionChars[r]; ok {
 		return true
 	}
-	// Check basic character set
-	for _, gsmRune := range gsm7Chars {
-		if r == gsmRune {
-			return true
-		}
+	_, ok := gsm7Chars[r]
+	return ok
+}
+
+// gsm7CharLength returns the character length in GSM-7 encoding.
+// Extension chars count as 2 (escape prefix + actual char).
+// Basic chars count as 1.
+func gsm7CharLength(r rune) int {
+	if _, ok := gsm7ExtensionChars[r]; ok {
+		return 2
 	}
-	return false
+	return 1
 }
 
 // calculateParts computes the number of SMS parts needed.
+// For GSM-7, extension characters count as 2 chars each.
 func calculateParts(text string, encoding string) int {
 	if text == "" {
 		return 1
 	}
 
-	charCount := utf8.RuneCountInString(text)
+	var totalChars int
+	switch encoding {
+	case "GSM7":
+		for _, r := range text {
+			totalChars += gsm7CharLength(r)
+		}
+	default:
+		totalChars = utf8.RuneCountInString(text)
+	}
 
 	var maxLen, concatLen int
 	switch encoding {
@@ -192,13 +213,12 @@ func calculateParts(text string, encoding string) int {
 		return 1
 	}
 
-	if charCount <= maxLen {
+	if totalChars <= maxLen {
 		return 1
 	}
 
-	// Calculate parts for concatenated SMS
-	parts := charCount / concatLen
-	if charCount%concatLen != 0 {
+	parts := totalChars / concatLen
+	if totalChars%concatLen != 0 {
 		parts++
 	}
 	return parts

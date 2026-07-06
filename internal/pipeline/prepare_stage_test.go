@@ -46,18 +46,46 @@ func TestPrepareStage_UCS2Encoding(t *testing.T) {
 	}
 }
 
-func TestPrepareStage_EuroEncoding(t *testing.T) {
+func TestPrepareStage_EuroSign_GSM7Ext(t *testing.T) {
 	s := NewPrepareStage()
 	state := validState()
-	state.Message.Text = "Price: €100" // Euro sign is GSM7 extension
+	state.Message.Text = "€100" // Euro sign is GSM-7 extension character
 
 	result, err := s.Process(context.Background(), state)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	// € is a GSM-7 extension character, still GSM7
 	if result.SendRequest.Encoding != "GSM7" {
 		t.Fatalf("expected GSM7 encoding for text with €, got %q", result.SendRequest.Encoding)
+	}
+}
+
+func TestPrepareStage_GSM7ExtensionCharLength(t *testing.T) {
+	// Extension chars (^, {, }, etc.) count as 2 chars in GSM-7.
+	// So "^^" = 4 chars = still fits in 1 part (max 160).
+	// But 80 '^' chars = 160 chars = 1 part (boundary).
+	// 81 '^' chars = 162 chars = 2 parts.
+	s := NewPrepareStage()
+	state := validState()
+
+	// 80 extension chars = 160 GSM-7 chars = exactly 1 part
+	state.Message.Text = string(repeat('^', 80))
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if result.SendRequest.Parts != 1 {
+		t.Fatalf("expected 1 part for 80 extension chars (160 GSM7 len), got %d", result.SendRequest.Parts)
+	}
+
+	// 81 extension chars = 162 GSM-7 chars = 2 parts
+	state.Message.Text = string(repeat('^', 81))
+	result, err = s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if result.SendRequest.Parts != 2 {
+		t.Fatalf("expected 2 parts for 81 extension chars (162 GSM7 len), got %d", result.SendRequest.Parts)
 	}
 }
 
@@ -78,7 +106,7 @@ func TestPrepareStage_PartsCount_GSM7_Short(t *testing.T) {
 func TestPrepareStage_PartsCount_GSM7_Multi(t *testing.T) {
 	s := NewPrepareStage()
 	state := validState()
-	state.Message.Text = string(repeat('a', 161)) // 161 chars → 2 parts (153 + 8)
+	state.Message.Text = string(repeat('a', 161)) // 161 → 2 parts
 
 	result, err := s.Process(context.Background(), state)
 	if err != nil {
@@ -92,7 +120,7 @@ func TestPrepareStage_PartsCount_GSM7_Multi(t *testing.T) {
 func TestPrepareStage_PartsCount_UCS2_Short(t *testing.T) {
 	s := NewPrepareStage()
 	state := validState()
-	state.Message.Text = string(repeat('界', 70)) // 70 UCS-2 chars
+	state.Message.Text = string(repeat('界', 70))
 
 	result, err := s.Process(context.Background(), state)
 	if err != nil {
@@ -106,7 +134,7 @@ func TestPrepareStage_PartsCount_UCS2_Short(t *testing.T) {
 func TestPrepareStage_PartsCount_UCS2_Multi(t *testing.T) {
 	s := NewPrepareStage()
 	state := validState()
-	state.Message.Text = string(repeat('界', 71)) // 71 UCS-2 chars → 2 parts
+	state.Message.Text = string(repeat('界', 71))
 
 	result, err := s.Process(context.Background(), state)
 	if err != nil {
@@ -128,6 +156,8 @@ func TestPrepareStage_PhoneNormalization(t *testing.T) {
 		{"+1-234-567-8900", "+12345678900"},
 		{"  +1 234 567 8900  ", "+12345678900"},
 		{"", ""},
+		{"+", "+"}, // plus only → just +
+		{"++1234", "+1234"}, // second + is stripped
 	}
 
 	for _, tt := range tests {
@@ -139,12 +169,12 @@ func TestPrepareStage_PhoneNormalization(t *testing.T) {
 			_, err := s.Process(context.Background(), state)
 			if tt.expected == "" {
 				if !errors.Is(err, ErrInvalidDestination) {
-					t.Fatalf("expected ErrInvalidDestination for empty input, got: %v", err)
+					t.Fatalf("expected ErrInvalidDestination for %q, got: %v", tt.input, err)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+				t.Fatalf("unexpected error for %q: %v", tt.input, err)
 			}
 			if state.Message.Destination != tt.expected {
 				t.Fatalf("expected %q, got %q", tt.expected, state.Message.Destination)
@@ -188,6 +218,24 @@ func TestPipeline_ValidateThenPrepare(t *testing.T) {
 	}
 	if state.SendRequest.Parts != 1 {
 		t.Fatalf("expected 1 part, got %d", state.SendRequest.Parts)
+	}
+}
+
+func TestPrepareStage_DoesNotMutateMessage(t *testing.T) {
+	// domain.Message.Encoding and Parts should not be modified by PrepareStage.
+	// All derived values go into SendRequest only.
+	s := NewPrepareStage()
+	state := validState()
+	state.Message.Text = "Hello"
+
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	// SendRequest carries the derived values
+	if result.SendRequest.Encoding != "GSM7" {
+		t.Fatalf("expected GSM7 in SendRequest, got %q", result.SendRequest.Encoding)
 	}
 }
 

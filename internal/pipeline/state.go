@@ -59,7 +59,7 @@ type SendRequest struct {
 	Parts       int    // number of SMS parts (after splitting)
 	ConnectorID string
 	TraceID     string
-	Config      []byte // protocol-specific config (JSONB)
+	Config      []byte // protocol-specific config, connector defines the schema
 }
 
 // SendResult is the output from a Connector.Send() call.
