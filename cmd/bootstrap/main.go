@@ -116,7 +116,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create default tenant and membership for the super admin
+	var tenantID string
+	err = db.QueryRow(ctx,
+		`INSERT INTO tenants (name, slug, status, settings, created_by, updated_by)
+		 VALUES ($1, $2, 'active', '{}'::jsonb, $3, $3)
+		 RETURNING id`,
+		*adminName+"'s Tenant",
+		"default-tenant",
+		userID,
+	).Scan(&tenantID)
+	if err != nil {
+		fmt.Printf("Error creating default tenant: %v\n", err)
+		os.Exit(1)
+	}
+
+	_, err = db.Exec(ctx,
+		`INSERT INTO tenant_members (tenant_id, user_id, role)
+		 VALUES ($1, $2, 'admin')`,
+		tenantID, userID,
+	)
+	if err != nil {
+		fmt.Printf("Error creating tenant membership: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Printf("✓ Super admin created: %s (id: %s)\n", *adminEmail, userID)
+	fmt.Printf("✓ Default tenant created: %s (id: %s)\n", *adminName+"'s Tenant", tenantID)
 	fmt.Println("✓ Bootstrap complete")
 }
 

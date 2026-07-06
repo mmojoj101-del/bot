@@ -40,9 +40,11 @@ func NewRouteService(
 
 // Create creates a new route.
 func (s *RouteService) Create(ctx context.Context, input domain.CreateRouteInput, createdBy, requestID, ipAddress string) (*domain.Route, error) {
-	// Verify the connector exists
-	if _, err := s.connectorRepo.GetByID(ctx, input.ConnectorID); err != nil {
-		return nil, fmt.Errorf("connector: %w", err)
+	// Verify the connector exists — only if ConnectorID is provided
+	if input.ConnectorID != "" {
+		if _, err := s.connectorRepo.GetByID(ctx, input.ConnectorID); err != nil {
+			return nil, fmt.Errorf("connector: %w", err)
+		}
 	}
 
 	var route *domain.Route

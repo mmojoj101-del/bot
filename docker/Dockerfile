@@ -16,7 +16,7 @@ COPY . .
 
 # Build API server
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w -X main.version=$(cat .env.example 2>/dev/null || echo '0.1.0')" \
+    -ldflags="-s -w" \
     -o /app/bin/fury-sms-gateway ./cmd/api
 
 # Build bootstrap command

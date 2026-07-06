@@ -73,6 +73,10 @@ func New(
 	routeHandler := handler.NewRouteHandler(routeService)
 	auditHandler := handler.NewAuditHandler(auditService)
 
+	// Message service and handler
+	msgService := service.NewMessageService(msgRepo, auditRepo, eventBus, clock)
+	msgHandler := handler.NewMessageHandler(msgService)
+
 	// DLR handler (for delivery receipts) — uses same promMetrics to avoid duplicate promauto registration
 	dlrMapper := connector.NewDefaultDLRMapper(domain.ConnectorTypeHTTPClient)
 	dlrHandler := handler.NewDLRHandler(msgRepo, connectorRepo, dlrMapper, promMetrics)
@@ -161,6 +165,11 @@ func New(
 
 	// DLR callbacks (no JWT - called by external providers)
 	v1.Post("/dlr/:connector_id", dlrHandler.ReceiveDLR)
+
+	// Messages (tenant-scoped)
+	protected.Post("/messages", msgHandler.CreateMessage)
+	protected.Get("/messages", msgHandler.ListMessages)
+	protected.Get("/messages/:id", msgHandler.GetMessage)
 
 	// Audit logs
 	protected.Get("/audit-logs", auditHandler.ListByTenant)

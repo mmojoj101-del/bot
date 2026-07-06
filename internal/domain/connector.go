@@ -1,6 +1,9 @@
 package domain
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Connector represents a protocol connector (SMPP, HTTP, SIP) configuration.
 type Connector struct {
@@ -19,7 +22,7 @@ type CreateConnectorInput struct {
 	TenantID string           `json:"-"`
 	Type     ConnectorType    `json:"type" validate:"required"`
 	Name     string           `json:"name" validate:"required"`
-	Config   []byte           `json:"config"`
+	Config   json.RawMessage  `json:"config"`
 	Status   *ConnectorStatus `json:"status,omitempty"`
 }
 
@@ -28,7 +31,7 @@ type UpdateConnectorInput struct {
 	Name    *string           `json:"name,omitempty"`
 	Type    *ConnectorType    `json:"type,omitempty"`
 	Status  *ConnectorStatus  `json:"status,omitempty"`
-	Config  []byte            `json:"config,omitempty"`
+	Config  json.RawMessage   `json:"config,omitempty"`
 }
 
 // ConnectorStatus represents the operational status of a connector.
