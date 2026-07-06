@@ -151,7 +151,22 @@ func (w *OutboxWorker) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
 	})
-	w.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		slog.Warn("outbox worker shutdown timed out, forcing cancel",
+			"timeout", shutdownTimeout,
+			"restart_count", w.restartCnt.Load(),
+		)
+	}
+
 	w.cancel()
 }
 

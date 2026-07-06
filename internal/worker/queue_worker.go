@@ -188,14 +188,36 @@ func (w *QueueWorker) iteration() (ok bool) {
 	}
 }
 
+// shutdownTimeout is the maximum time to wait for the worker goroutine
+// to exit before forcing context cancellation.
+const shutdownTimeout = 30 * time.Second
+
 // Stop signals the worker to shut down gracefully. Idempotent.
-// Order: close(stopCh) → WaitGroup.Wait() → cancel(ctx)
-// This ensures in-flight HTTP requests and DB queries finish before context is cancelled.
+// Order: close(stopCh) → WaitGroup.Wait(timeout) → cancel(ctx)
+// If the goroutine does not exit within shutdownTimeout, cancel is forced
+// and a warning is logged (stuck driver / external library).
 func (w *QueueWorker) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
 	})
-	w.wg.Wait()
+
+	// Wait with timeout to avoid hanging on stuck goroutines
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// normal exit — goroutine finished within timeout
+	case <-time.After(shutdownTimeout):
+		slog.Warn("queue worker shutdown timed out, forcing cancel",
+			"timeout", shutdownTimeout,
+			"restart_count", w.restartCnt.Load(),
+		)
+	}
+
 	// cancel after WaitGroup — in-flight requests use ctx from parent
 	w.cancel()
 }
@@ -266,6 +288,15 @@ func (w *QueueWorker) processBatch() {
 		w.recordBatchEnd(start, 0)
 		return
 	}
+
+	// Report queue depth to metrics (gauge) — claimed messages + remaining
+	// This is a best-effort estimate: we know how many we just claimed.
+	if w.metrics != nil && len(messages) > 0 {
+		if mr, ok := w.metrics.(interface{ SetQueueDepth(int64) }); ok {
+			mr.SetQueueDepth(int64(len(messages)))
+		}
+	}
+
 	if len(messages) == 0 {
 		w.recordBatchEnd(start, 0)
 		return

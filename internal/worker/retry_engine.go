@@ -184,7 +184,22 @@ func (e *RetryEngine) Stop() {
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
 	})
-	e.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		slog.Warn("retry engine shutdown timed out, forcing cancel",
+			"timeout", shutdownTimeout,
+			"restart_count", e.restartCnt.Load(),
+		)
+	}
+
 	e.cancel()
 }
 
