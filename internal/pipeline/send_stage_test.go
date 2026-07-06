@@ -12,7 +12,7 @@ import (
 // This simulates the output of Validate→Prepare→Route stages.
 func routedState() *PipelineState {
 	state := validState()
-	state.SendRequest = &SendRequest{
+	state.Prepared = &PreparedMessage{
 		Destination: "+1234567890",
 		Encoding:    "GSM7",
 		Parts:       1,
@@ -78,6 +78,9 @@ func TestSendStage_Success(t *testing.T) {
 	if !result.SendResult.Success {
 		t.Fatal("expected successful send")
 	}
+	if result.SendResult.ErrorCode != "" {
+		t.Fatalf("expected no error code, got %q", result.SendResult.ErrorCode)
+	}
 	if result.SendResult.ExternalID != "ext-123" {
 		t.Fatalf("expected ext-123, got %q", result.SendResult.ExternalID)
 	}
@@ -127,7 +130,7 @@ func TestSendStage_NoDecision(t *testing.T) {
 	}
 }
 
-func TestSendStage_NoSendRequest(t *testing.T) {
+func TestSendStage_NoPreparedMessage(t *testing.T) {
 	reg := &mockRegistry{
 		senders: map[string]domain.Sender{
 			"connector-http-1": &mockSender{result: &domain.SendResult{ExternalID: "ext"}},
@@ -135,11 +138,11 @@ func TestSendStage_NoSendRequest(t *testing.T) {
 	}
 	stage := NewSendStage(reg)
 	state := routedState()
-	state.SendRequest = nil
+	state.Prepared = nil
 
 	_, err := stage.Process(context.Background(), state)
 	if err == nil {
-		t.Fatal("expected error when SendRequest is nil")
+		t.Fatal("expected error when Prepared is nil")
 	}
 }
 
@@ -179,8 +182,8 @@ func TestPipeline_FullSequence(t *testing.T) {
 	}
 
 	// Verify all stages populated their results
-	if state.SendRequest == nil {
-		t.Fatal("expected SendRequest")
+	if state.Prepared == nil {
+		t.Fatal("expected Prepared")
 	}
 	if state.Decision == nil {
 		t.Fatal("expected Decision")
@@ -229,8 +232,8 @@ func TestPipeline_FullSequence_SendFails(t *testing.T) {
 	}
 
 	// Verify earlier stages populated their results
-	if state.SendRequest == nil {
-		t.Fatal("expected SendRequest even on failure")
+	if state.Prepared == nil {
+		t.Fatal("expected Prepared even on failure")
 	}
 	if state.Decision == nil {
 		t.Fatal("expected Decision even on failure")

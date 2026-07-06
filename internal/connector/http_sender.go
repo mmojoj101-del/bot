@@ -82,12 +82,16 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		return nil, fmt.Errorf("parse connector config: %w", err)
 	}
 
-	// Determine encoding and destination from SendRequest (set by pipeline)
-	encoding := req.Encoding
+	// Determine encoding and destination from req.Prepared (set by pipeline)
+	encoding := ""
+	destination := ""
+	if req.Prepared != nil {
+		encoding = req.Prepared.Encoding
+		destination = req.Prepared.Destination
+	}
 	if encoding == "" {
 		encoding = string(req.Message.Encoding)
 	}
-	destination := req.Destination
 	if destination == "" {
 		destination = req.Message.Destination
 	}
@@ -185,7 +189,10 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 	providerStatus := extractField(respBody, cfg.StatusPath)
 
 	// Use pre-calculated parts from pipeline, or fall back to counting
-	parts := req.Parts
+	parts := 0
+	if req.Prepared != nil {
+		parts = req.Prepared.Parts
+	}
 	if parts <= 0 {
 		parts = countSMSParts(req.Message.Text, req.Message.Encoding)
 	}

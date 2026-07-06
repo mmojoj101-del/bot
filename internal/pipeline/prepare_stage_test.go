@@ -18,17 +18,17 @@ func TestPrepareStage_ValidMessageGSM7(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if result.SendRequest == nil {
+	if result.Prepared == nil {
 		t.Fatal("expected SendRequest to be set")
 	}
-	if result.SendRequest.Encoding != "GSM7" {
-		t.Fatalf("expected GSM7 encoding, got %q", result.SendRequest.Encoding)
+	if result.Prepared.Encoding != "GSM7" {
+		t.Fatalf("expected GSM7 encoding, got %q", result.Prepared.Encoding)
 	}
-	if result.SendRequest.Parts != 1 {
-		t.Fatalf("expected 1 part for short message, got %d", result.SendRequest.Parts)
+	if result.Prepared.Parts != 1 {
+		t.Fatalf("expected 1 part for short message, got %d", result.Prepared.Parts)
 	}
-	if result.SendRequest.Destination != "+1234567890" {
-		t.Fatalf("expected normalized destination, got %q", result.SendRequest.Destination)
+	if result.Prepared.Destination != "+1234567890" {
+		t.Fatalf("expected normalized destination, got %q", result.Prepared.Destination)
 	}
 }
 
@@ -41,8 +41,8 @@ func TestPrepareStage_UCS2Encoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Encoding != "UCS2" {
-		t.Fatalf("expected UCS2 encoding for Arabic text, got %q", result.SendRequest.Encoding)
+	if result.Prepared.Encoding != "UCS2" {
+		t.Fatalf("expected UCS2 encoding for Arabic text, got %q", result.Prepared.Encoding)
 	}
 }
 
@@ -55,8 +55,8 @@ func TestPrepareStage_EuroSign_GSM7Ext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Encoding != "GSM7" {
-		t.Fatalf("expected GSM7 encoding for text with €, got %q", result.SendRequest.Encoding)
+	if result.Prepared.Encoding != "GSM7" {
+		t.Fatalf("expected GSM7 encoding for text with €, got %q", result.Prepared.Encoding)
 	}
 }
 
@@ -74,8 +74,8 @@ func TestPrepareStage_GSM7ExtensionCharLength(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Parts != 1 {
-		t.Fatalf("expected 1 part for 80 extension chars (160 GSM7 len), got %d", result.SendRequest.Parts)
+	if result.Prepared.Parts != 1 {
+		t.Fatalf("expected 1 part for 80 extension chars (160 GSM7 len), got %d", result.Prepared.Parts)
 	}
 
 	// 81 extension chars = 162 GSM-7 chars = 2 parts
@@ -84,8 +84,8 @@ func TestPrepareStage_GSM7ExtensionCharLength(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Parts != 2 {
-		t.Fatalf("expected 2 parts for 81 extension chars (162 GSM7 len), got %d", result.SendRequest.Parts)
+	if result.Prepared.Parts != 2 {
+		t.Fatalf("expected 2 parts for 81 extension chars (162 GSM7 len), got %d", result.Prepared.Parts)
 	}
 }
 
@@ -98,8 +98,8 @@ func TestPrepareStage_PartsCount_GSM7_Short(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Parts != 1 {
-		t.Fatalf("expected 1 part for 160 GSM7 chars, got %d", result.SendRequest.Parts)
+	if result.Prepared.Parts != 1 {
+		t.Fatalf("expected 1 part for 160 GSM7 chars, got %d", result.Prepared.Parts)
 	}
 }
 
@@ -112,8 +112,8 @@ func TestPrepareStage_PartsCount_GSM7_Multi(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Parts != 2 {
-		t.Fatalf("expected 2 parts for 161 GSM7 chars, got %d", result.SendRequest.Parts)
+	if result.Prepared.Parts != 2 {
+		t.Fatalf("expected 2 parts for 161 GSM7 chars, got %d", result.Prepared.Parts)
 	}
 }
 
@@ -126,8 +126,8 @@ func TestPrepareStage_PartsCount_UCS2_Short(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Parts != 1 {
-		t.Fatalf("expected 1 part for 70 UCS2 chars, got %d", result.SendRequest.Parts)
+	if result.Prepared.Parts != 1 {
+		t.Fatalf("expected 1 part for 70 UCS2 chars, got %d", result.Prepared.Parts)
 	}
 }
 
@@ -140,8 +140,8 @@ func TestPrepareStage_PartsCount_UCS2_Multi(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.SendRequest.Parts != 2 {
-		t.Fatalf("expected 2 parts for 71 UCS2 chars, got %d", result.SendRequest.Parts)
+	if result.Prepared.Parts != 2 {
+		t.Fatalf("expected 2 parts for 71 UCS2 chars, got %d", result.Prepared.Parts)
 	}
 }
 
@@ -176,11 +176,11 @@ func TestPrepareStage_PhoneNormalization(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error for %q: %v", tt.input, err)
 			}
-			if result.SendRequest == nil {
+			if result.Prepared == nil {
 				t.Fatal("expected SendRequest")
 			}
-			if result.SendRequest.Destination != tt.expected {
-				t.Fatalf("expected %q, got %q", tt.expected, result.SendRequest.Destination)
+			if result.Prepared.Destination != tt.expected {
+				t.Fatalf("expected %q, got %q", tt.expected, result.Prepared.Destination)
 			}
 			// Verify msg.Destination is NOT mutated by PrepareStage.
 			// The original raw input must be preserved on the domain entity.
@@ -218,14 +218,14 @@ func TestPipeline_ValidateThenPrepare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected pipeline to succeed, got: %v", err)
 	}
-	if state.SendRequest == nil {
+	if state.Prepared == nil {
 		t.Fatal("expected SendRequest after Prepare stage")
 	}
-	if state.SendRequest.Encoding != "GSM7" {
-		t.Fatalf("expected GSM7 encoding, got %q", state.SendRequest.Encoding)
+	if state.Prepared.Encoding != "GSM7" {
+		t.Fatalf("expected GSM7 encoding, got %q", state.Prepared.Encoding)
 	}
-	if state.SendRequest.Parts != 1 {
-		t.Fatalf("expected 1 part, got %d", state.SendRequest.Parts)
+	if state.Prepared.Parts != 1 {
+		t.Fatalf("expected 1 part, got %d", state.Prepared.Parts)
 	}
 }
 
@@ -242,8 +242,8 @@ func TestPrepareStage_DoesNotMutateMessage(t *testing.T) {
 	}
 
 	// SendRequest carries the derived values
-	if result.SendRequest.Encoding != "GSM7" {
-		t.Fatalf("expected GSM7 in SendRequest, got %q", result.SendRequest.Encoding)
+	if result.Prepared.Encoding != "GSM7" {
+		t.Fatalf("expected GSM7 in SendRequest, got %q", result.Prepared.Encoding)
 	}
 }
 

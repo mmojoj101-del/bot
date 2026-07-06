@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
@@ -14,7 +13,7 @@ import (
 //
 // Lifecycle:
 //  1. Resolve the sender by Decision.ConnectorID via ConnectorRegistry
-//  2. Build domain.SendRequest from pipeline state (without mutating domain.Message)
+//  2. Build domain.SendRequest from PreparedMessage + PipelineState
 //  3. Call sender.Send(ctx, domain.SendRequest)
 //  4. Store the result in PipelineState.SendResult
 type SendStage struct {
@@ -32,10 +31,9 @@ func (s *SendStage) Name() string {
 }
 
 var (
-	// ErrNoRoute is returned when SendStage has no routing decision.
-	ErrNoRoute = fmt.Errorf("send stage: no routing decision")
-	// ErrNoSendRequest is returned when SendStage has no prepared request.
-	ErrNoSendRequest = fmt.Errorf("send stage: no prepared send request")
+	ErrNoRoute         = fmt.Errorf("send stage: no routing decision")
+	ErrNoPrepared      = fmt.Errorf("send stage: no prepared message")
+	ErrConnectorUnavailable = fmt.Errorf("send stage: connector not available")
 )
 
 // Process sends the prepared message through the routed connector.
@@ -43,26 +41,23 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 	if state.Decision == nil {
 		return nil, ErrNoRoute
 	}
-	if state.SendRequest == nil {
-		return nil, ErrNoSendRequest
+	if state.Prepared == nil {
+		return nil, ErrNoPrepared
 	}
 
-	// Resolve sender from registry (domain.Sender, not a pipeline-specific connector)
+	// Resolve sender from registry (domain.Sender, not a pipeline interface)
 	sender, err := s.registry.Resolve(ctx, state.Decision.ConnectorID)
 	if err != nil {
-		return nil, fmt.Errorf("send stage: connector %q not available: %w", state.Decision.ConnectorID, err)
+		return nil, fmt.Errorf("%w: %q: %w", ErrConnectorUnavailable, state.Decision.ConnectorID, err)
 	}
 
-	// Build domain-level SendRequest from pipeline state:
-	//   - Message: canonical message (unchanged — Pipeline never mutates it)
-	//   - Destination/Encoding/Parts: from PrepareStage (via pipeline.SendRequest)
-	//   - Timeout: reasonable default (connector config may override)
+	// Build domain-level SendRequest:
+	//   - Message: canonical domain message (unchanged — pipeline never mutates it)
+	//   - Prepared: from PrepareStage (destination/encoding/parts)
+	//   - Prepared type is shared (domain.PreparedMessage) so no field drift
 	sendReq := domain.SendRequest{
-		Message:     state.Message,
-		Timeout:     30 * time.Second,
-		Destination: state.SendRequest.Destination,
-		Encoding:    state.SendRequest.Encoding,
-		Parts:       state.SendRequest.Parts,
+		Message:   state.Message,
+		Prepared:  state.Prepared,
 	}
 
 	// Call sender.Send with value-type SendRequest (connector cannot mutate it)
@@ -71,12 +66,14 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 		return nil, fmt.Errorf("send stage: connector %q returned error: %w", state.Decision.ConnectorID, err)
 	}
 
-	// Map domain.SendResult to pipeline.SendResult
+	// Map domain.SendResult to pipeline.SendResult.
+	// Success = the provider accepted the message (no transport/protocol error).
+	// Domain-level details (external_id, provider_status) are in the result.
 	state.SendResult = &SendResult{
-		Success:      domainResult.ExternalID != "",
+		Success:      true,
 		ExternalID:   domainResult.ExternalID,
 		Parts:        domainResult.Parts,
-		ErrorCode:    "",
+		ErrorCode:    domainResult.ProviderStatus,
 		ErrorMessage: "",
 	}
 

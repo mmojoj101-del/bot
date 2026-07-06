@@ -94,15 +94,15 @@ func TestPipeline_ValidatePrepareRoute(t *testing.T) {
 		t.Fatalf("unexpected error: %v", state.Error)
 	}
 
-	// Prepare stage: SendRequest populated
-	if state.SendRequest == nil {
-		t.Fatal("expected SendRequest from PrepareStage")
+	// Prepare stage: PreparedMessage populated
+	if state.Prepared == nil {
+		t.Fatal("expected PreparedMessage from PrepareStage")
 	}
-	if state.SendRequest.Encoding != "GSM7" {
-		t.Fatalf("expected GSM7 encoding, got %q", state.SendRequest.Encoding)
+	if state.Prepared.Encoding != "GSM7" {
+		t.Fatalf("expected GSM7 encoding, got %q", state.Prepared.Encoding)
 	}
-	if state.SendRequest.Parts != 1 {
-		t.Fatalf("expected 1 part, got %d", state.SendRequest.Parts)
+	if state.Prepared.Parts != 1 {
+		t.Fatalf("expected 1 part, got %d", state.Prepared.Parts)
 	}
 
 	// Route stage: Decision populated
@@ -132,9 +132,9 @@ func TestPipeline_ValidatePrepareRoute_RouteFails(t *testing.T) {
 		t.Fatal("expected pipeline to fail when route fails")
 	}
 
-	// SendRequest should still be set (PrepareStage ran before RouteStage)
-	if state.SendRequest == nil {
-		t.Fatal("expected SendRequest even when route fails")
+	// PreparedMessage should still be set (PrepareStage ran before RouteStage)
+	if state.Prepared == nil {
+		t.Fatal("expected PreparedMessage even when route fails")
 	}
 
 	// Decision should NOT be set (RouteStage failed)

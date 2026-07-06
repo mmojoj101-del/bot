@@ -11,8 +11,9 @@ type PipelineState struct {
 	// Message is the canonical message being processed.
 	Message *domain.Message
 
-	// SendRequest is the prepared request for the connector (set by PrepareStage).
-	SendRequest *SendRequest
+	// Prepared is the output of PrepareStage (normalized destination, encoding, parts).
+	// Defined as domain.PreparedMessage to share the struct with domain.SendRequest.
+	Prepared *domain.PreparedMessage
 
 	// Decision is the routing decision (set by RouteStage, never modified after).
 	Decision *RoutingDecision
@@ -49,26 +50,10 @@ type RoutingDecision struct {
 	CapabilitiesUsed []string
 }
 
-// SendRequest carries the pipeline-local results of PrepareStage.
-// It is deliberately minimal — only fields that cannot live in
-// domain.Message (which is immutable in the pipeline) or that
-// are pipeline-internal (Config for connector resolution).
-// Everything else flows through domain.SendRequest.
-type SendRequest struct {
-	// Destination is the normalized phone number (E.164-like format).
-	// The raw msg.Destination is preserved on domain.Message.
-	Destination string
-
-	// Encoding is the detected message content encoding ("GSM7" or "UCS2").
-	Encoding string
-
-	// Parts is the number of SMS parts after splitting.
-	Parts int
-
-	// Config is connector-specific configuration loaded by SendStage.
-	// Populated from ConnectorRegistry during send; not set by PrepareStage.
-	Config []byte
-}
+// PreparedMessage is defined in the domain package and shared between
+// PipelineState.Prepared (prepareStage output) and domain.SendRequest.Prepared
+// (sender input). This alias avoids an import rename in pipeline code.
+type PreparedMessage = domain.PreparedMessage
 
 // SendResult is the output from a Connector.Send() call.
 type SendResult struct {

@@ -116,26 +116,32 @@ type OutboxEvent struct {
 	PublishedAt *time.Time `json:"published_at,omitempty"`
 }
 
+// PreparedMessage carries the results of message preparation.
+// Created by PrepareStage (pipeline), consumed by Sender implementations.
+// This shared struct ensures preparation fields are defined once and
+// never drift between the pipeline and sender contracts.
+type PreparedMessage struct {
+	// Destination is the normalized phone number (E.164-like format).
+	// The raw msg.Destination is preserved on domain.Message.
+	Destination string
+
+	// Encoding is the detected message content encoding ("GSM7" or "UCS2").
+	Encoding string
+
+	// Parts is the number of SMS parts after splitting.
+	Parts int
+}
+
 // SendRequest carries all context needed for a connector to send a message.
 type SendRequest struct {
 	Message   *Message
 	Connector *Connector
 	Timeout   time.Duration
 
-	// Destination is the normalized phone number (E.164-like format).
-	// Set by the pipeline's PrepareStage; the sender SHOULD prefer this
-	// over Message.Destination (which holds the original raw input).
-	Destination string
-
-	// Encoding is the detected message encoding ("GSM7" or "UCS2").
-	// Set by the pipeline's PrepareStage; the sender uses this instead of
-	// re-deriving it from the message text.
-	Encoding string
-
-	// Parts is the number of SMS parts after splitting.
-	// Set by the pipeline's PrepareStage; the sender uses this instead of
-	// re-counting from the message text.
-	Parts int
+	// Prepared carries the normalization result from PrepareStage.
+	// The sender SHOULD prefer Prepared.Destination over Message.Destination
+	// (which holds the original raw input).
+	Prepared *PreparedMessage
 }
 
 // SendResult carries the outcome of a send attempt.

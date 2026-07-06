@@ -67,9 +67,9 @@ var (
 //   - Normalize phone numbers to canonical format
 //   - Detect encoding (GSM-7 or UCS-2)
 //   - Calculate SMS part count
-//   - Fill SendRequest on PipelineState
+//   - Fill PreparedMessage on PipelineState
 //
-// It does NOT mutate domain.Message — all derived values go into SendRequest.
+// It does NOT mutate domain.Message — all derived values go into PreparedMessage.
 // No I/O, no routing, no pricing, no database access.
 type PrepareStage struct{}
 
@@ -83,13 +83,13 @@ func (s *PrepareStage) Name() string {
 	return "prepare"
 }
 
-// Process normalizes the message and fills derived fields into SendRequest.
-// The domain.Message is NOT mutated — all derived values go into SendRequest only.
+// Process normalizes the message and fills derived fields into PreparedMessage.
+// The domain.Message is NOT mutated — all derived values go into PreparedMessage only.
 func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	msg := state.Message
 
 	// 1. Normalize destination to E.164-like format (strip non-digits, ensure +).
-	// The normalized version goes into SendRequest, NOT msg.Destination.
+	// The normalized version goes into PreparedMessage, NOT msg.Destination.
 	dest := normalizePhone(msg.Destination)
 	if dest == "" {
 		return nil, fmt.Errorf("%w: %q after normalization", ErrInvalidDestination, msg.Destination)
@@ -104,11 +104,11 @@ func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 	// 3. Calculate number of SMS parts (GSM-7 extension chars count as 2)
 	parts := calculateParts(msg.Text, encoding)
 
-	// 4. Fill SendRequest with pipeline-local preparation results.
-	//    Only fields that cannot live on domain.Message (immutable in pipeline)
-	//    or that are pipeline-internal go here. domain.SendRequest carries
-	//    the rest (Message, Encoding, Parts, Destination) to the sender.
-	state.SendRequest = &SendRequest{
+	// 4. Fill PreparedMessage with pipeline-local preparation results.
+	//    Only derived values that cannot live on domain.Message go here.
+	//    domain.SendRequest carries them (Message + Destination/Encoding/Parts)
+	//    to the sender in the next stage.
+	state.Prepared = &PreparedMessage{
 		Destination: dest,
 		Encoding:    encoding,
 		Parts:       parts,
