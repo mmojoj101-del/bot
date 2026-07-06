@@ -34,6 +34,23 @@ The Worker is just an **Executor** — the real engine is Domain Events.
               └── ...any future feature = new subscriber
 ```
 
+### Domain Event Publisher Interface
+
+The Worker must not know the Event Bus implementation. It depends on an interface:
+
+```go
+type DomainEventPublisher interface {
+    Publish(ctx context.Context, event DomainEvent) error
+}
+```
+
+The Worker calls `publisher.Publish(ctx, MessageSent{...})` — it never knows if the implementation is:
+- In-memory (`MemoryBus`)
+- Outbox-pattern (PostgreSQL `outbox_events` table)
+- Kafka / NATS / RabbitMQ
+
+This decouples domain logic from infrastructure. Swap the implementation without touching the Worker.
+
 ### Every Step is an Event
 
 Instead of a monolithic Worker calling services, each lifecycle step produces a **Domain Event**:
@@ -478,6 +495,51 @@ func (p *Pipeline) Execute(ctx context.Context, msg *PipelineMessage) error {
 ```
 
 ---
+
+## 📐 Horizontal Scaling from Day One
+
+The system must support **horizontal scaling** without shared memory. Every component must be designed as if multiple instances are running simultaneously.
+
+### Design Principles for Scale
+
+| Principle | Implementation |
+|-----------|---------------|
+| **Stateless Workers** | Workers hold no in-memory state that can't be rebuilt. All state is in PostgreSQL or Redis |
+| **Queue-based coordination** | Messages claimed via `FOR UPDATE SKIP LOCKED` — workers don't compete for the same message |
+| **Distributed locks** | Only where absolutely necessary (e.g., SMPP session ownership). Use Redis `SET NX EX` or PostgreSQL advisory locks |
+| **No leader election** | Every worker is equal. No master/slave assumption |
+| **Shared nothing** | No in-process channels between workers. Coordination is through the database or message broker |
+| **Idempotent subscribers** | Event subscribers handle duplicate events safely (UPSERT, version check) |
+| **Caches are local** | In-memory caches (route tables, templates) are warmable on startup. Loss of cache is not a failure |
+
+### What NOT to Do
+
+```
+❌ In-process channel for worker coordination
+❌ Global variables that assume single instance
+❌ Mutexes that protect single-instance assumptions
+❌ Local file system for persistence
+❌ In-memory queues with no persistence
+```
+
+### Example: 10 Workers Running
+
+```
+PostgreSQL Queue (messages table)
+  │ 10 workers all polling with FOR UPDATE SKIP LOCKED
+  │ Only 1 worker claims each message (SKIP LOCKED)
+  ▼
+Worker-3 claims message-42
+  │ Publishes MessageClaimed
+  │ Pipeline executes (Validate → Route → Send → Complete)
+  │ Updates message status to sent/failed
+  │ Publishes MessageSent/MessageFailed
+  ▼
+All 10 workers receive the event via event bus
+  │ Only subscribers react (audit, billing, metrics are all idempotent)
+  ▼
+Message delivered. Worker-3 is free to claim the next message.
+```
 
 ## 📐 Execution Rules
 
