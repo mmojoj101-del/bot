@@ -496,6 +496,126 @@ func (p *Pipeline) Execute(ctx context.Context, msg *PipelineMessage) error {
 
 ---
 
+## 📐 Execution Ground Rules (Before Phase 2.5 Code)
+
+### 1. Transaction Boundaries
+
+| Operation | Transaction? | Scope |
+|-----------|-------------|-------|
+| Claim message from queue | ✅ Yes | 1 TX — FOR UPDATE SKIP LOCKED + status update |
+| Update state + write outbox event | ✅ Yes | 1 TX — atomic: state change + event written together |
+| HTTP/SMPP/SIP Send | ❌ No | Outside TX — network I/O must not hold DB locks |
+| Publish event to bus | ❌ No | After TX commits — no I/O inside transactions |
+| Retry scheduling | ✅ Yes | 1 TX — insert scheduled_task |
+
+**Rule**: Network calls (send, HTTP request, SMPP PDU) are always outside DB transactions.
+Transactions are only for DB state mutations.
+
+### 2. Failure Taxonomy
+
+Every error returned by any component must be classified:
+
+| Category | Example | Retry? |
+|----------|---------|--------|
+| **Permanent** | Invalid phone number, blocked sender | ❌ No |
+| **Retryable** | Provider returned "try again", timeout | ✅ Yes, with backoff |
+| **Transient** | Network timeout, DNS failure | ✅ Yes, immediate retry |
+| **RateLimited** | HTTP 429, SMPP throttling | ✅ Yes, with longer backoff |
+| **Authentication** | Wrong API key, expired token | ❌ No (until re-authorized) |
+| **Misconfiguration** | Invalid URL, missing field | ❌ No (until config fixed) |
+| **Internal** | DB deadlock, nil pointer | ✅ Yes (with alerting) |
+
+```go
+type ErrorCategory string
+
+const (
+    ErrorPermanent       ErrorCategory = "permanent"
+    ErrorRetryable       ErrorCategory = "retryable"
+    ErrorTransient       ErrorCategory = "transient"
+    ErrorRateLimited     ErrorCategory = "rate_limited"
+    ErrorAuthentication  ErrorCategory = "authentication"
+    ErrorMisconfiguration ErrorCategory = "misconfiguration"
+    ErrorInternal        ErrorCategory = "internal"
+)
+
+type SendError struct {
+    Category    ErrorCategory
+    Code        string    // provider error code
+    Message     string    // human-readable
+    RetryAfter  *time.Duration // for rate-limited errors
+}
+```
+
+### 3. Idempotency Policy
+
+| Property | Value |
+|----------|-------|
+| **Key** | `tenant_id + client_ref` (unique index, partial `WHERE client_ref IS NOT NULL`) |
+| **Scope** | Per-tenant — no cross-tenant collision |
+| **TTL** | Never deleted (historical record). Duplicate key → return existing message |
+| **Worker restart** | Messages in `queued` status are re-claimed after restart. `client_ref` prevents re-creating the same message |
+| **Crash recovery** | Outbox pattern ensures events are written atomically with state changes. If crash occurs after send but before event: last status in DB is `sent`, outbox_event is re-published on recovery |
+| **DLR idempotency** | `connector_id + external_id` unique check. Version-based optimistic locking prevents double-DLR updates |
+
+### 4. Command vs Event Separation
+
+Commands and Events are **different things** with different naming and behavior:
+
+```go
+// Commands — imperative, directed at a specific handler
+// Convention: Verb + Noun + Command
+type SendMessageCommand struct {
+    MessageID     string
+    TenantID      string
+    ConnectorID   string
+    ScheduledFor  *time.Time  // optional delay
+}
+
+// Events — past tense, broadcast to all subscribers
+// Convention: Noun + PastTenseVerb + Event, versioned
+// Payload is in the envelope, not the struct name
+const EventTypeMessageQueuedV1 = "message.queued.v1"
+const EventTypeMessageSentV1  = "message.sent.v1"
+```
+
+**Rules**:
+- Commands go to a **specific handler** (e.g., Pipeline.Execute)
+- Events go to **all subscribers** via EventBus
+- Never name an event like a command (`MessageSend` ❌ → `MessageSent` ✅)
+- Never name a command like an event (`MessageSentCommand` ❌ → `SendMessageCommand` ✅)
+
+### 5. Compatibility Matrix
+
+| Component | Versioned? | Breaking Change Policy |
+|-----------|-----------|----------------------|
+| **Core** (Domain models, State Machine) | SemVer (v0.x.y) | Major version for breaking changes |
+| **Connector Interface** (`Send/Health/Close`) | Small interfaces, additive | New methods = new interface (never change existing) |
+| **Connector Implementations** (HTTP, SMPP, SIP) | Per-connector | No impact on Core — isolated behind interface |
+| **Provider Adapters** | Per-provider | Adapter cannot break Core or HTTP Connector |
+| **Event Versions** | `message.queued.v1` | New versions are additive. Old subscribers continue working with old versions |
+| **API Versions** | `/api/v1/` | New version = new route prefix. Old versions deprecated, not removed |
+| **DB Schema** | Migration files | Additive changes (new columns, new tables). Breaking changes = new migration + data migration |
+
+### 6. Performance Targets (SLOs)
+
+Measurable goals — not general statements:
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Claim latency | < 50ms P99 | Time from poll to successful claim (FOR UPDATE SKIP LOCKED) |
+| Pipeline execution | < 500ms P99 (excluding send) | Time through all pipeline stages |
+| HTTP send latency | < 5s P99 | Time from `Connector.Send()` to response |
+| SMPP submit_sm latency | < 1s P99 | Time for submit_sm → submit_sm_resp |
+| Throughput per worker | 50 msg/s sustained (HTTP), 100 msg/s (SMPP) | Messages processed per second per worker instance |
+| Max retry delay | 300s (5 min) | Maximum time between a failure and next retry attempt |
+| Connector recovery | < 30s | Time from failure detection to automatic recovery |
+| Graceful shutdown | < 30s | All inflight messages complete or returned to queue |
+| DLR processing | < 100ms P99 | Time from DLR receipt to message status update |
+
+These SLOs are verified in Phase 3 (Production Validation).
+
+---
+
 ## 📐 Horizontal Scaling from Day One
 
 The system must support **horizontal scaling** without shared memory. Every component must be designed as if multiple instances are running simultaneously.

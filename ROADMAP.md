@@ -145,6 +145,33 @@ New platform features (Rate Limiting, Billing, Fraud Detection) = new pipeline s
 - **100% unit test coverage** on critical paths (claim → send → ack → retry)
 - **Integration test** with real PostgreSQL + mock connector
 
+### First Commit — Minimal Scaffold
+
+The first commit in Phase 2.5 is intentionally small:
+
+```
+internal/
+├── domain/
+│   └── events/
+│       ├── envelope.go      — EventEnvelope struct, event type constants (versioned)
+│       └── publisher.go     — DomainEventPublisher interface (small: Publish only)
+├── pipeline/
+│   ├── pipeline.go          — Pipeline { stages []Stage, Execute(ctx, *PipelineState) }
+│   ├── stage.go             — Stage interface { Name(), Process(ctx, *PipelineState) }
+│   └── state.go             — PipelineState { Message, Decision, SendResult, Attempt, Trace, Metadata }
+└── worker/
+    └── executor.go           — WorkerExecutor { claim → pipeline → publish events }
+```
+
+**What is NOT in the first commit**:
+- No send logic (no HTTP, SMPP, SIP)
+- No retry logic
+- No routing engine
+- No connectors
+- No actual worker loop (that comes after scaffold compiles)
+
+**Goal of first commit**: The scaffold compiles, tests pass, and the architecture can be reviewed before any business logic is added.
+
 ### Status Flow Through the Pipeline
 
 ```
