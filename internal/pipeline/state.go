@@ -11,6 +11,9 @@ type PipelineState struct {
 	// Message is the canonical message being processed.
 	Message *domain.Message
 
+	// SendRequest is the prepared request for the connector (set by PrepareStage).
+	SendRequest *SendRequest
+
 	// Decision is the routing decision (set by RouteStage, never modified after).
 	Decision *RoutingDecision
 
@@ -30,7 +33,7 @@ type PipelineState struct {
 	TraceID string
 
 	// Metadata is a mutable map for stages to pass data downstream.
-	// Namespace your keys (e.g., "validate.encoding", "route.candidates").
+	// Namespace your keys (e.g., "prepare.encoding", "route.candidates").
 	Metadata map[string]interface{}
 }
 
@@ -53,6 +56,7 @@ type SendRequest struct {
 	Destination string
 	Text        string
 	Encoding    string // GSM7, UCS2
+	Parts       int    // number of SMS parts (after splitting)
 	ConnectorID string
 	TraceID     string
 	Config      []byte // protocol-specific config (JSONB)

@@ -24,8 +24,8 @@ func TestValidateStage_ValidState(t *testing.T) {
 func TestValidateStage_NilState(t *testing.T) {
 	s := NewValidateStage()
 	_, err := s.Process(context.Background(), nil)
-	if !errors.Is(err, ErrNilMessage) {
-		t.Fatalf("expected ErrNilMessage, got: %v", err)
+	if !errors.Is(err, ErrNilPipelineState) {
+		t.Fatalf("expected ErrNilPipelineState, got: %v", err)
 	}
 }
 

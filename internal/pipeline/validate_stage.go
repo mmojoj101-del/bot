@@ -9,6 +9,9 @@ import (
 )
 
 var (
+	// ErrNilPipelineState is returned when PipelineState itself is nil.
+	ErrNilPipelineState = errors.New("pipeline state is nil")
+
 	// ErrNilMessage is returned when PipelineState.Message is nil.
 	ErrNilMessage = errors.New("message is nil")
 
@@ -49,7 +52,7 @@ func (s *ValidateStage) Name() string {
 // if the state or message is not suitable for pipeline execution.
 func (s *ValidateStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	if state == nil {
-		return nil, ErrNilMessage
+		return nil, ErrNilPipelineState
 	}
 
 	msg := state.Message
