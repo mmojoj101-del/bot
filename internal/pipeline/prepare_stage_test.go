@@ -166,7 +166,7 @@ func TestPrepareStage_PhoneNormalization(t *testing.T) {
 			state.Message.Destination = tt.input
 			s := NewPrepareStage()
 
-			_, err := s.Process(context.Background(), state)
+			result, err := s.Process(context.Background(), state)
 			if tt.expected == "" {
 				if !errors.Is(err, ErrInvalidDestination) {
 					t.Fatalf("expected ErrInvalidDestination for %q, got: %v", tt.input, err)
@@ -176,8 +176,16 @@ func TestPrepareStage_PhoneNormalization(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error for %q: %v", tt.input, err)
 			}
-			if state.Message.Destination != tt.expected {
-				t.Fatalf("expected %q, got %q", tt.expected, state.Message.Destination)
+			if result.SendRequest == nil {
+				t.Fatal("expected SendRequest")
+			}
+			if result.SendRequest.Destination != tt.expected {
+				t.Fatalf("expected %q, got %q", tt.expected, result.SendRequest.Destination)
+			}
+			// Verify msg.Destination is NOT mutated by PrepareStage.
+			// The original raw input must be preserved on the domain entity.
+			if state.Message.Destination != tt.input {
+				t.Fatalf("msg.Destination should not be mutated; expected original %q, got %q", tt.input, state.Message.Destination)
 			}
 		})
 	}

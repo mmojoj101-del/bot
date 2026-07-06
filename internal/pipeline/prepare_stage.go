@@ -84,17 +84,16 @@ func (s *PrepareStage) Name() string {
 }
 
 // Process normalizes the message and fills derived fields into SendRequest.
-// The domain.Message is NOT mutated (except Destination normalization which
-// is a lightweight formatting change, not a domain state change).
+// The domain.Message is NOT mutated — all derived values go into SendRequest only.
 func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	msg := state.Message
 
-	// 1. Normalize destination to E.164-like format (strip non-digits, ensure +)
+	// 1. Normalize destination to E.164-like format (strip non-digits, ensure +).
+	// The normalized version goes into SendRequest, NOT msg.Destination.
 	dest := normalizePhone(msg.Destination)
 	if dest == "" {
 		return nil, fmt.Errorf("%w: %q after normalization", ErrInvalidDestination, msg.Destination)
 	}
-	msg.Destination = dest
 
 	// 2. Detect encoding based on text content
 	encoding, err := detectEncoding(msg.Text)
@@ -105,11 +104,12 @@ func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 	// 3. Calculate number of SMS parts (GSM-7 extension chars count as 2)
 	parts := calculateParts(msg.Text, encoding)
 
-	// 4. Fill SendRequest for downstream stages — NOT the domain.Message
+	// 4. Fill SendRequest for downstream stages — all derived values here,
+	//    domain.Message is left unchanged (immutability principle).
 	state.SendRequest = &SendRequest{
 		MessageID:   msg.ID,
 		Source:      msg.Source,
-		Destination: msg.Destination,
+		Destination: dest,
 		Text:        msg.Text,
 		Encoding:    encoding,
 		Parts:       parts,
