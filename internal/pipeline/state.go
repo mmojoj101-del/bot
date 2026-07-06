@@ -49,17 +49,25 @@ type RoutingDecision struct {
 	CapabilitiesUsed []string
 }
 
-// SendRequest is the input to a Connector.Send() call.
+// SendRequest carries the pipeline-local results of PrepareStage.
+// It is deliberately minimal — only fields that cannot live in
+// domain.Message (which is immutable in the pipeline) or that
+// are pipeline-internal (Config for connector resolution).
+// Everything else flows through domain.SendRequest.
 type SendRequest struct {
-	MessageID   string
-	Source      string
+	// Destination is the normalized phone number (E.164-like format).
+	// The raw msg.Destination is preserved on domain.Message.
 	Destination string
-	Text        string
-	Encoding    string // GSM7, UCS2
-	Parts       int    // number of SMS parts (after splitting)
-	ConnectorID string
-	TraceID     string
-	Config      []byte // protocol-specific config, connector defines the schema
+
+	// Encoding is the detected message content encoding ("GSM7" or "UCS2").
+	Encoding string
+
+	// Parts is the number of SMS parts after splitting.
+	Parts int
+
+	// Config is connector-specific configuration loaded by SendStage.
+	// Populated from ConnectorRegistry during send; not set by PrepareStage.
+	Config []byte
 }
 
 // SendResult is the output from a Connector.Send() call.

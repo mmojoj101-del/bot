@@ -122,6 +122,11 @@ type SendRequest struct {
 	Connector *Connector
 	Timeout   time.Duration
 
+	// Destination is the normalized phone number (E.164-like format).
+	// Set by the pipeline's PrepareStage; the sender SHOULD prefer this
+	// over Message.Destination (which holds the original raw input).
+	Destination string
+
 	// Encoding is the detected message encoding ("GSM7" or "UCS2").
 	// Set by the pipeline's PrepareStage; the sender uses this instead of
 	// re-deriving it from the message text.

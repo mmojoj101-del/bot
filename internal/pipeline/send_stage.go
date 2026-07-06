@@ -53,15 +53,16 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 		return nil, fmt.Errorf("send stage: connector %q not available: %w", state.Decision.ConnectorID, err)
 	}
 
-	// Build domain-level SendRequest:
-	//   - Message: the canonical message (unchanged — Pipeline never mutates it)
-	//   - Encoding/Parts: from PrepareStage (via SendRequest, not from domain.Message)
+	// Build domain-level SendRequest from pipeline state:
+	//   - Message: canonical message (unchanged — Pipeline never mutates it)
+	//   - Destination/Encoding/Parts: from PrepareStage (via pipeline.SendRequest)
 	//   - Timeout: reasonable default (connector config may override)
 	sendReq := domain.SendRequest{
-		Message:   state.Message,
-		Timeout:   30 * time.Second,
-		Encoding:  state.SendRequest.Encoding,
-		Parts:     state.SendRequest.Parts,
+		Message:     state.Message,
+		Timeout:     30 * time.Second,
+		Destination: state.SendRequest.Destination,
+		Encoding:    state.SendRequest.Encoding,
+		Parts:       state.SendRequest.Parts,
 	}
 
 	// Call sender.Send with value-type SendRequest (connector cannot mutate it)

@@ -82,14 +82,18 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		return nil, fmt.Errorf("parse connector config: %w", err)
 	}
 
-	// Determine encoding from SendRequest (set by pipeline) or message
+	// Determine encoding and destination from SendRequest (set by pipeline)
 	encoding := req.Encoding
 	if encoding == "" {
 		encoding = string(req.Message.Encoding)
 	}
+	destination := req.Destination
+	if destination == "" {
+		destination = req.Message.Destination
+	}
 
 	// Build request body from cached template
-	body, err := s.buildBody(cfg.BodyTemplate, req.Message, encoding)
+	body, err := s.buildBody(cfg.BodyTemplate, req.Message, encoding, destination)
 	if err != nil {
 		return nil, fmt.Errorf("build request body: %w", err)
 	}
@@ -198,17 +202,23 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 }
 
 // buildBody uses a cached template to avoid re-parsing on every send.
-func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message, encoding string) ([]byte, error) {
+func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message, encoding string, destination string) ([]byte, error) {
 	// Convert string encoding to domain type for template data
 	domainEncoding := msg.Encoding
 	if encoding != "" {
 		domainEncoding = domain.Encoding(encoding)
 	}
 
+	// Use normalized destination when available, fall back to original
+	dest := destination
+	if dest == "" {
+		dest = msg.Destination
+	}
+
 	if tmpl == "" {
 		return json.Marshal(map[string]interface{}{
 			"source":      msg.Source,
-			"destination": msg.Destination,
+			"destination": dest,
 			"text":        msg.Text,
 			"encoding":    domainEncoding,
 			"client_ref":  msg.ClientRef,
@@ -228,7 +238,7 @@ func (s *HTTPSender) buildBody(tmpl string, msg *domain.Message, encoding string
 
 	data := map[string]interface{}{
 		"Source":      msg.Source,
-		"Destination": msg.Destination,
+		"Destination": dest,
 		"Text":        msg.Text,
 		"Parts":       countSMSParts(msg.Text, domainEncoding),
 		"Encoding":    domainEncoding,

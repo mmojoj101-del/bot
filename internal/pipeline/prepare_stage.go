@@ -104,13 +104,12 @@ func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 	// 3. Calculate number of SMS parts (GSM-7 extension chars count as 2)
 	parts := calculateParts(msg.Text, encoding)
 
-	// 4. Fill SendRequest for downstream stages — all derived values here,
-	//    domain.Message is left unchanged (immutability principle).
+	// 4. Fill SendRequest with pipeline-local preparation results.
+	//    Only fields that cannot live on domain.Message (immutable in pipeline)
+	//    or that are pipeline-internal go here. domain.SendRequest carries
+	//    the rest (Message, Encoding, Parts, Destination) to the sender.
 	state.SendRequest = &SendRequest{
-		MessageID:   msg.ID,
-		Source:      msg.Source,
 		Destination: dest,
-		Text:        msg.Text,
 		Encoding:    encoding,
 		Parts:       parts,
 	}

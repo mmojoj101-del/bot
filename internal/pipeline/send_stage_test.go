@@ -13,14 +13,9 @@ import (
 func routedState() *PipelineState {
 	state := validState()
 	state.SendRequest = &SendRequest{
-		MessageID:   "msg-1",
-		Source:      "app-1",
 		Destination: "+1234567890",
-		Text:        "Hello, World!",
 		Encoding:    "GSM7",
 		Parts:       1,
-		ConnectorID: "connector-http-1",
-		TraceID:     "trace-1",
 	}
 	state.Decision = &RoutingDecision{
 		RouteID:      "route-1",
