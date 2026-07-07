@@ -111,15 +111,178 @@ Handlers:
 ### 4. Codec is Pure
 
 ```go
-type Codec struct{}
+type Version int
 
-func (c *Codec) Encode(pdu *PDU) ([]byte, error)
-func (c *Codec) Decode(data []byte) (*PDU, error)
+const (
+    Version3_3 Version = iota + 1
+    Version3_4  // primary target
+    Version5_0
+)
+
+type Codec struct {
+    Version Version
+}
+
+func (c *Codec) Encode(pdu PDU) ([]byte, error)
+func (c *Codec) Decode(data []byte) (PDU, error)
 ```
 
 - Zero knowledge of Session, State, Window, or Pending
+- Version-aware: `Codec{Version: Version3_4}` — even if only 3.4 is supported now,
+  the type prevents hard-coded version assumptions
 - Testable in isolation: `Encode(SubmitSM)` → `[]byte` → `Decode` → `*PDU` round-trip
 - Handles: 32-bit length header, command_id, command_status, sequence_number, mandatory fields, TLVs
+
+#### 4a. Header/PDU Interface
+
+Every SMPP PDU starts with the same 16-byte header. The Codec exposes it as a first-class type:
+
+```go
+type Header struct {
+    Length         uint32
+    CommandID      CommandID
+    CommandStatus  CommandStatus
+    SequenceNumber uint32
+}
+
+// PDU is the interface for all SMPP PDUs after decoding.
+type PDU interface {
+    Header() *Header
+}
+```
+
+Concrete PDU types implement this interface:
+
+```go
+type SubmitSM struct {
+    hdr                Header
+    ServiceType        string
+    SourceAddrTON      uint8
+    SourceAddrNPI      uint8
+    SourceAddr         string
+    DestAddrTON        uint8
+    DestAddrNPI        uint8
+    DestinationAddr    string
+    ESMClass           uint8
+    ProtocolID         uint8
+    PriorityFlag       uint8
+    ScheduleDelivery   string
+    ValidityPeriod     string
+    RegisteredDelivery uint8
+    ReplaceIfPresent   uint8
+    DataCoding         uint8
+    SMDefaultMsgID     uint8
+    ShortMessage       []byte
+    TLVs               []TLV
+}
+
+func (s *SubmitSM) Header() *Header { return &s.hdr }
+```
+
+**Rationale**: Duplicating header fields in every PDU struct is error-prone. The `PDU` interface allows the Dispatcher and PendingStore to work with any PDU type polymorphically.
+
+#### 4b. Decoder Registry
+
+Instead of a giant switch statement:
+
+```go
+type DecoderFunc func(header *Header, body []byte) (PDU, error)
+
+var decoders = map[CommandID]DecoderFunc{
+    CommandIDBindTransceiver:    decodeBindTransceiver,
+    CommandIDBindTransceiverResp: decodeBindTransceiverResp,
+    CommandIDSubmitSM:           decodeSubmitSM,
+    CommandIDSubmitSMResp:       decodeSubmitSMResp,
+    CommandIDDeliverSM:          decodeDeliverSM,
+    CommandIDEnquireLink:        decodeEnquireLink,
+    CommandIDEnquireLinkResp:    decodeEnquireLinkResp,
+    CommandIDUnbind:             decodeUnbind,
+    CommandIDUnbindResp:         decodeUnbindResp,
+    CommandIDGenericNack:        decodeGenericNack,
+}
+
+func (c *Codec) Decode(data []byte) (PDU, error) {
+    if len(data) < 16 {
+        return nil, ErrMalformedPDU
+    }
+    hdr := decodeHeader(data)
+    decoder, ok := decoders[hdr.CommandID]
+    if !ok {
+        return &GenericPDU{Header: hdr, RawBody: data[16:]}, nil
+    }
+    return decoder(hdr, data[16:])
+}
+```
+
+**Rationale**: Adding a new PDU type = adding a decoder function + registering it. Zero switch statements. The registry can be extended dynamically for vendor-specific PDUs.
+
+#### 4c. Typed Errors
+
+```go
+var (
+    ErrMalformedPDU       = errors.New("smpp: malformed PDU")
+    ErrUnknownCommand     = errors.New("smpp: unknown command ID")
+    ErrInvalidLength      = errors.New("smpp: invalid PDU length")
+    ErrUnsupportedTLV     = errors.New("smpp: unsupported TLV")
+    ErrInvalidCString     = errors.New("smpp: invalid null-terminated string")
+    ErrInvalidDataCoding  = errors.New("smpp: invalid data coding")
+    ErrShortHeader        = errors.New("smpp: PDU shorter than 16-byte header")
+)
+```
+
+**Rationale**: Typed errors make tests clearer (`errors.Is(err, ErrMalformedPDU)`), logs more actionable, and error handling more precise.
+
+#### 4d. Binary Test Data
+
+Test against real PDUs captured from SMSCs, not just round-trip generated data:
+
+```
+testdata/
+    bind_transceiver.bin
+    bind_transceiver_resp.bin
+    submit_sm.bin
+    submit_sm_resp.bin
+    deliver_sm.bin
+    deliver_sm_resp.bin
+    enquire_link.bin
+    enquire_link_resp.bin
+    unbind.bin
+    unbind_resp.bin
+```
+
+Test pattern:
+
+```go
+func TestDecodeRealPDU(t *testing.T) {
+    data, _ := os.ReadFile("testdata/submit_sm.bin")
+    pdu, err := codec.Decode(data)
+    if err != nil {
+        t.Fatalf("decode failed: %v", err)
+    }
+    reEncoded, _ := codec.Encode(pdu)
+    if !bytes.Equal(data, reEncoded) {
+        t.Error("re-encoded PDU does not match original")
+    }
+}
+```
+
+**Rationale**: Round-trip tests only verify internal consistency. Real PDU data catches encoding/decoding bugs that self-generated tests miss.
+
+#### 4e. Execution Order for Codec
+
+```
+1. Define: Header, PDU interface, CommandID constants
+2. Define: TLV type, typed errors, version
+3. Implement: header encode/decode (binary: big-endian uint32)
+4. Register: GenericNack decoder (simplest — header only)
+5. Register: EnquireLink + EnquireLinkResp decoders (header only)
+6. Register: BindTransceiver + BindTransceiverResp decoders
+7. Register: SubmitSM + SubmitSMResp decoders (mandatory fields + TLVs)
+8. Register: DeliverSM + DeliverSMResp decoders
+9. Register: Unbind + UnbindResp decoders
+10. Implement: Encode(PDU) — handles all registered types
+11. Tests: round-trip for every type + real .bin test data
+```
 
 ### 5. TLV as []TLV, Not Struct Fields
 
