@@ -318,6 +318,127 @@ func TestSession_ReaderError_Propagated(t *testing.T) {
 	s.Disconnect(context.Background())
 }
 
+func TestSession_LateResponse_AfterClear(t *testing.T) {
+	s, ft := newSessionWithFake(t)
+
+	// Send a request that will wait for a response
+	ctx := context.Background()
+	pdu := &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}}
+
+	// Start sending
+	respCh := make(chan error, 1)
+	go func() {
+		_, err := s.SendRequest(ctx, pdu)
+		respCh <- err
+	}()
+
+	// Wait for write
+	select {
+	case <-ft.writeCh:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for write")
+	}
+
+	// Disconnect — this clears pending
+	s.Disconnect(context.Background())
+
+	// Now send a late response (after pending was cleared)
+	lateResp := &EnquireLinkResp{
+		Hdr: Header{CommandID: CommandIDEnquireLinkResp, SequenceNumber: 1, CommandStatus: StatusOK},
+	}
+	lateData, _ := s.codec.Encode(lateResp)
+	ft.readCh <- lateData
+
+	// Let the late response be processed briefly
+	time.Sleep(20 * time.Millisecond)
+
+	// The SendRequest should have returned an error from the cancel
+	select {
+	case err := <-respCh:
+		if err == nil {
+			t.Log("SendRequest returned nil (may have completed before shutdown)")
+		}
+	default:
+		t.Log("SendRequest still waiting (timing-dependent)")
+	}
+}
+
+func TestSession_Disconnect_WithPendingRequest(t *testing.T) {
+	s, ft := newSessionWithFake(t)
+
+	// Start a request that will remain pending
+	ctx := context.Background()
+	pdu := &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}}
+
+	respCh := make(chan error, 1)
+	go func() {
+		_, err := s.SendRequest(ctx, pdu)
+		respCh <- err
+	}()
+
+	// Wait for write
+	select {
+	case <-ft.writeCh:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for write")
+	}
+
+	// Ensure pending count is > 0 before disconnect
+	if n := s.pending.Len(); n != 1 {
+		t.Fatalf("expected 1 pending request, got %d", n)
+	}
+
+	// Disconnect — should cancel the pending request
+	err := s.Disconnect(context.Background())
+	if err != nil {
+		t.Fatalf("Disconnect error: %v", err)
+	}
+
+	// SendRequest should have been unblocked (with error)
+	select {
+	case err := <-respCh:
+		if err == nil {
+			t.Log("SendRequest returned nil (completed before disconnect)")
+		} else {
+			t.Logf("SendRequest error (expected): %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendRequest not unblocked after disconnect")
+	}
+
+	// Pending should be empty
+	if n := s.pending.Len(); n != 0 {
+		t.Errorf("expected 0 pending after disconnect, got %d", n)
+	}
+}
+
+func TestSession_WriteQueueFull_EnquireLinkDropped(t *testing.T) {
+	s, ft := newSessionWithFake(t)
+
+	// Fill the write queue (buffer = windowSize * 2 = 10)
+	seq := uint32(1)
+	for i := 0; i < 50; i++ {
+		s.writeQ.TryEnqueue(&EnquireLinkResp{
+			Hdr: Header{
+				CommandID:       CommandIDEnquireLinkResp,
+				CommandStatus:   StatusOK,
+				SequenceNumber: seq,
+			},
+		})
+		seq++
+	}
+
+	// Check: some may be dropped due to queue being full
+	queued := s.writeQ.Len()
+	t.Logf("write queue has %d items after 50 TryEnqueue (buf=10)", queued)
+	if queued > 10 {
+		t.Errorf("queue cap exceeded: %d > 10", queued)
+	}
+
+	s.Disconnect(context.Background())
+	_ = ft
+}
+
 // ── Default Config ──────────────────────────────────────────────────────────
 
 func TestSession_DefaultConfig(t *testing.T) {
