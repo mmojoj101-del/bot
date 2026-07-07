@@ -4,24 +4,20 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/raghna/fury-sms-gateway/internal/domain"
+	"github.com/raghna/fury-sms-gateway/internal/routing"
 )
-
-// Router decides which connector should handle a message.
-// The Pipeline only calls Route() — it never knows how routing works
-// (static, round-robin, failover, weighted, or future strategies).
-type Router interface {
-	Route(ctx context.Context, msg *domain.Message) (*RoutingDecision, error)
-}
 
 // RouteStage asks the Router for a routing decision and stores it
 // in PipelineState.Decision. It does NOT modify the domain.Message.
+//
+// The Router implementation determines the strategy (static, round_robin,
+// failover, weighted) — RouteStage is agnostic.
 type RouteStage struct {
-	router Router
+	router routing.Router
 }
 
 // NewRouteStage creates a new RouteStage with the given Router implementation.
-func NewRouteStage(router Router) *RouteStage {
+func NewRouteStage(router routing.Router) *RouteStage {
 	return &RouteStage{router: router}
 }
 

@@ -50,17 +50,10 @@ type PipelineState struct {
 	TraceID string
 }
 
-// RoutingDecision is an immutable value object set once by the Routing Engine.
-// No stage may modify it after creation.
-type RoutingDecision struct {
-	RouteID          string
-	ConnectorID      string
-	StrategyUsed     string   // static, round_robin, failover, weighted
-	Priority         int
-	Cost             int64    // thousandths of a cent, at selection time
-	Reason           string   // why this route was chosen
-	CapabilitiesUsed []string
-}
+// RoutingDecision is defined in the domain package.
+// It is an alias here so PipelineState.Decision reads naturally
+// without importing the domain package in every file.
+type RoutingDecision = domain.RoutingDecision
 
 // PreparedMessage is defined in the domain package and shared between
 // PipelineState.Prepared (prepareStage output) and domain.SendRequest.Prepared
