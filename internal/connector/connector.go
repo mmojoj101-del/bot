@@ -30,9 +30,10 @@ type GenericConnector struct {
 	config   ConnectorConfig
 	driver   ProtocolDriver
 
-	tmpl       *template.Engine
-	ruleEngine *rule.Engine
-	metrics    domain.MetricsRecorder
+	tmpl           *template.Engine
+	ruleEngine     *rule.Engine
+	metrics        domain.MetricsRecorder
+	circuitBreaker CircuitBreakerStore
 
 	// decodedConfig is the cached, decoded transport config (before per-message rendering).
 	// Set during lazyInit, used by CheckHealth.
@@ -54,6 +55,10 @@ func WithRuleEngine(re *rule.Engine) GenericConnectorOption {
 
 func WithMetricsRecorder(m domain.MetricsRecorder) GenericConnectorOption {
 	return func(c *GenericConnector) { c.metrics = m }
+}
+
+func WithCircuitBreakerStore(cbs CircuitBreakerStore) GenericConnectorOption {
+	return func(c *GenericConnector) { c.circuitBreaker = cbs }
 }
 
 func NewGenericConnector(

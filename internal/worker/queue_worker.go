@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/raghna/fury-sms-gateway/internal/connector"
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 	"github.com/raghna/fury-sms-gateway/internal/event"
 )
@@ -18,19 +19,18 @@ const MaxConsecutiveRestarts = 10
 
 // RestartEvent carries information about a worker restart.
 type RestartEvent struct {
-	WorkerType         string
-	RestartCount       int64
+	WorkerType          string
+	RestartCount        int64
 	ConsecutiveFailures int
-	Backoff            time.Duration
-	Critical           bool
+	Backoff             time.Duration
+	Critical            bool
 }
 
 // QueueWorker pulls queued messages and sends them through the appropriate connector.
 type QueueWorker struct {
 	queueRepo    domain.QueueRepository
 	msgRepo      domain.MessageRepository
-	connRepo     domain.ConnectorRepository
-	senders      map[domain.ConnectorType]domain.Sender
+	registry     connector.ConnectorRegistry
 	retry        domain.RetryPolicy
 	metrics      domain.MetricsRecorder
 	eventBus     eventPublisher
@@ -60,13 +60,11 @@ type eventPublisher interface {
 }
 
 // NewQueueWorker creates a new queue worker.
-// Accept a parent context so main owns the context tree.
 func NewQueueWorker(
 	parentCtx context.Context,
 	queueRepo domain.QueueRepository,
 	msgRepo domain.MessageRepository,
-	connRepo domain.ConnectorRepository,
-	senders map[domain.ConnectorType]domain.Sender,
+	registry connector.ConnectorRegistry,
 	retry domain.RetryPolicy,
 	metrics domain.MetricsRecorder,
 	eventBus eventPublisher,
@@ -76,8 +74,7 @@ func NewQueueWorker(
 	w := &QueueWorker{
 		queueRepo:    queueRepo,
 		msgRepo:      msgRepo,
-		connRepo:     connRepo,
-		senders:      senders,
+		registry:     registry,
 		retry:        retry,
 		metrics:      metrics,
 		eventBus:     eventBus,
@@ -109,8 +106,6 @@ func WithPollInterval(d time.Duration) QueueWorkerOption {
 }
 
 // WithRestartCallback registers a callback invoked on every restart.
-// The callback receives a RestartEvent with context about the failure.
-// Use this for Prometheus counters, alert hooks, or circuit-breaker logic.
 func WithRestartCallback(fn func(RestartEvent)) QueueWorkerOption {
 	return func(w *QueueWorker) { w.onRestart = fn }
 }
@@ -126,10 +121,9 @@ func (w *QueueWorker) Start() {
 		consecutiveFailures := 0
 		for {
 			if w.iteration() {
-				// Reset panic/success markers after a healthy iteration
 				backoff = 100 * time.Millisecond
 				consecutiveFailures = 0
-				w.lastPanicTime.Store(time.Time{}) // clear panic marker
+				w.lastPanicTime.Store(time.Time{})
 				continue
 			}
 			select {
@@ -137,226 +131,134 @@ func (w *QueueWorker) Start() {
 				return
 			default:
 				consecutiveFailures++
-				critical := consecutiveFailures >= MaxConsecutiveRestarts
-				level := slog.LevelWarn
-				if critical {
-					level = slog.LevelError
+			}
+			w.restartCnt.Add(1)
+			w.lastPanicTime.Store(time.Time{})
+			w.lastSuccessTime.Store(time.Time{})
+
+			maxBackoff := 30 * time.Second
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
 				}
-				slog.Log(w.ctx, level,
-					"queue worker restarting",
-					"restart_count", w.restartCnt.Load(),
-					"consecutive_failures", consecutiveFailures,
-					"backoff_ms", backoff.Milliseconds(),
-				)
-				w.onRestart(RestartEvent{
-					WorkerType:          "queue_worker",
-					RestartCount:        w.restartCnt.Load(),
-					ConsecutiveFailures: consecutiveFailures,
-					Backoff:             backoff,
-					Critical:            critical,
-				})
-				time.Sleep(backoff)
-				if backoff < 30*time.Second {
-					backoff *= 2
-				}
+			}
+
+			critical := consecutiveFailures >= MaxConsecutiveRestarts
+			w.onRestart(RestartEvent{
+				WorkerType:          "queue_worker",
+				RestartCount:        w.restartCnt.Load(),
+				ConsecutiveFailures: consecutiveFailures,
+				Backoff:             backoff,
+				Critical:            critical,
+			})
+
+			select {
+			case <-w.stopCh:
+				return
+			case <-time.After(backoff):
 			}
 		}
 	}()
-	slog.Info("queue worker started", "batch_size", w.batchSize, "poll_interval", w.pollInterval)
 }
 
-// iteration runs one poll cycle. Returns true on success, false on panic/shutdown.
-func (w *QueueWorker) iteration() (ok bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			w.restartCnt.Add(1)
-			w.lastPanicTime.Store(time.Now())
-			slog.Error("queue worker panic recovered",
-				"panic", r,
-				"restart_count", w.restartCnt.Load(),
-			)
-			ok = false
-		}
-	}()
-	select {
-	case <-w.stopCh:
-		return false
-	default:
-		w.processBatch()
-		time.Sleep(w.pollInterval)
-		return true
-	}
-}
-
-// shutdownTimeout is the maximum time to wait for the worker goroutine
-// to exit before forcing context cancellation.
-const shutdownTimeout = 30 * time.Second
-
-// Stop signals the worker to shut down gracefully. Idempotent.
-// Order: close(stopCh) → WaitGroup.Wait(timeout) → cancel(ctx)
-// If the goroutine does not exit within shutdownTimeout, cancel is forced
-// and a warning is logged (stuck driver / external library).
+// Stop signals the worker to stop and waits for it to finish.
 func (w *QueueWorker) Stop() {
 	w.stopOnce.Do(func() {
+		w.cancel()
 		close(w.stopCh)
 	})
-
-	// Wait with timeout to avoid hanging on stuck goroutines
-	done := make(chan struct{})
-	go func() {
-		w.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// normal exit — goroutine finished within timeout
-	case <-time.After(shutdownTimeout):
-		slog.Warn("queue worker shutdown timed out, forcing cancel",
-			"timeout", shutdownTimeout,
-			"restart_count", w.restartCnt.Load(),
-		)
-	}
-
-	// cancel after WaitGroup — in-flight requests use ctx from parent
-	w.cancel()
+	w.wg.Wait()
 }
 
-// healthyIdleThreshold is the maximum time since the last queue-draining
-// batch before the worker is considered stuck — ONLY when there is work.
-const healthyIdleThreshold = 5 * time.Minute
-
-// IsHealthy returns nil if the worker is healthy.
-// It checks: running flag, stop channel, and idle-with-work condition.
-// An empty queue with no work is NOT unhealthy — the worker is just waiting.
-func (w *QueueWorker) IsHealthy() error {
-	if !w.running.Load() {
-		return fmt.Errorf("queue worker is not running")
-	}
-	select {
-	case <-w.stopCh:
-		return fmt.Errorf("queue worker is stopped")
-	default:
-	}
-	// Only report unhealthy if the worker is idle AND has pending messages
-	// (stuck / deadlock / infinite backoff with work to do).
-	// An empty queue (lastBatchMsgCnt == 0) means the worker is just waiting.
-	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok && !v.IsZero() {
-		if w.lastBatchMsgCnt.Load() > 0 && time.Since(v) > healthyIdleThreshold {
-			return fmt.Errorf("queue worker idle for %v with work (threshold %v)",
-				time.Since(v).Round(time.Second), healthyIdleThreshold)
-		}
-	}
-	return nil
+// IsRunning reports whether the worker loop is currently executing.
+func (w *QueueWorker) IsRunning() bool {
+	return w.running.Load()
 }
 
-// HealthDetail returns detailed health info about the worker.
-// The returned map is compatible with JSON serialisation for /ready endpoint.
-func (w *QueueWorker) HealthDetail() map[string]interface{} {
-	var lastPanic, lastSuccess, lastBatchEnd time.Time
-	if v, ok := w.lastPanicTime.Load().(time.Time); ok {
-		lastPanic = v
-	}
-	if v, ok := w.lastSuccessTime.Load().(time.Time); ok {
-		lastSuccess = v
-	}
-	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok {
-		lastBatchEnd = v
-	}
-
-	return map[string]interface{}{
-		"type":                "queue_worker",
-		"alive":               w.running.Load(),
-		"stopped":             isClosed(w.stopCh),
-		"restart_count":       w.restartCnt.Load(),
-		"batch_size":          w.batchSize,
-		"poll_interval":       w.pollInterval.String(),
-		"last_panic_at":       nullTime(lastPanic),
-		"last_success_at":     nullTime(lastSuccess),
-		"last_batch_at":       nullTime(lastBatchEnd),
-		"last_batch_msgs":     w.lastBatchMsgCnt.Load(),
-		"last_batch_duration": durationMillis(w.lastBatchDur.Load()),
-	}
-}
-
-func (w *QueueWorker) processBatch() {
-	start := time.Now()
-
-	messages, err := w.queueRepo.ClaimQueued(w.ctx, w.batchSize)
+// iteration polls the queue for messages and processes them.
+func (w *QueueWorker) iteration() bool {
+	claimed, err := w.queueRepo.ClaimQueued(w.ctx, w.batchSize)
 	if err != nil {
-		slog.Error("claim queued messages", "error", err)
-		w.recordBatchEnd(start, 0)
-		return
-	}
-
-	// Report queue depth to metrics (gauge) — claimed messages + remaining
-	// This is a best-effort estimate: we know how many we just claimed.
-	if w.metrics != nil && len(messages) > 0 {
-		if mr, ok := w.metrics.(interface{ SetQueueDepth(int64) }); ok {
-			mr.SetQueueDepth(int64(len(messages)))
+		if w.ctx.Err() != nil {
+			return false
 		}
+		return true
 	}
 
-	if len(messages) == 0 {
-		w.recordBatchEnd(start, 0)
-		return
-	}
-
-	for _, msg := range messages {
+	if len(claimed) == 0 {
 		select {
 		case <-w.stopCh:
-			slog.Warn("shutting down, abandoning claimed messages", "count", len(messages))
-			w.recordBatchEnd(start, 0)
-			return
-		default:
+			return false
+		case <-time.After(w.pollInterval):
 		}
-		w.processMessage(w.ctx, msg)
+		return true
 	}
 
-	w.recordBatchEnd(start, len(messages))
-}
+	start := time.Now()
+	var wg sync.WaitGroup
 
-func (w *QueueWorker) recordBatchEnd(start time.Time, msgCount int) {
+	for i := range claimed {
+		msg := claimed[i]
+		wg.Add(1)
+		go func(m domain.Message) {
+			defer wg.Done()
+			w.processMessage(m)
+		}(msg)
+	}
+
+	wg.Wait()
+
 	elapsed := time.Since(start)
-	w.lastBatchEndTime.Store(time.Now())
-	w.lastBatchMsgCnt.Store(int64(msgCount))
+	w.lastBatchMsgCnt.Store(int64(len(claimed)))
 	w.lastBatchDur.Store(elapsed.Nanoseconds())
+	w.lastBatchEndTime.Store(time.Now())
+
+	return true
 }
 
-func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
-	logger := slog.With("message_id", msg.ID, "tenant_id", msg.TenantID)
+// processMessage handles a single claimed message.
+// It looks up the connector by ID and sends the message.
+func (w *QueueWorker) processMessage(msg domain.Message) {
+	logger := slog.With("message_id", msg.ID, "connector_id", msg.ConnectorID)
 
 	if msg.ConnectorID == nil || *msg.ConnectorID == "" {
 		logger.Warn("message has no connector, skipping")
 		return
 	}
 
-	connector, err := w.connRepo.GetByID(ctx, *msg.ConnectorID)
+	// Resolve connector from registry by ID (not by type).
+	// The registry holds pre-initialized GenericConnector instances.
+	conn, err := w.registry.Get(*msg.ConnectorID)
 	if err != nil {
-		logger.Error("fetch connector", "connector_id", *msg.ConnectorID, "error", err)
-		w.ackFailed(ctx, msg, "CONNECTOR_NOT_FOUND", err.Error())
+		logger.Error("connector not found in registry", "error", err)
+		w.ackFailed(msg, "CONNECTOR_NOT_FOUND", err.Error())
 		return
 	}
 
-	sender, ok := w.senders[connector.Type]
-	if !ok {
-		logger.Error("no sender registered", "connector_type", connector.Type)
-		w.ackFailed(ctx, msg, "NO_SENDER", fmt.Sprintf("no sender for type %s", connector.Type))
-		return
+	// Build prepared message. The message stored in the queue may not have
+	// a PreparedMessage — we build one from the message data.
+	// Destination uses msg.Prepared.Destination if available, else msg.Destination.
+	prepared := &domain.PreparedMessage{
+		Destination: msg.Destination,
+		Parts:       1,
+		Encoding:    string(msg.Encoding),
+	}
+	if msg.Parts > 0 {
+		prepared.Parts = msg.Parts
 	}
 
 	start := time.Now()
-	result, err := sender.Send(ctx, domain.SendRequest{
-		Message:   &msg,
-		Connector: connector,
-		Timeout:   30 * time.Second,
+	result, err := conn.Send(w.ctx, &domain.SendRequest{
+		Message:  &msg,
+		Prepared: prepared,
 	})
 	latency := time.Since(start)
 
 	if err != nil {
 		logger.Warn("send failed", "error", err, "retry_count", msg.RetryCount, "max_retries", msg.MaxRetries)
 		if msg.RetryCount < msg.MaxRetries {
-			if err := w.queueRepo.ScheduleRetry(ctx, msg.ID, int(msg.Version), "SEND_FAILED", err.Error()); err != nil {
+			if err := w.queueRepo.ScheduleRetry(w.ctx, msg.ID, int(msg.Version), "SEND_FAILED", err.Error()); err != nil {
 				logger.Error("schedule retry", "error", err)
 			} else {
 				logger.Info("message scheduled for retry", "attempt", msg.RetryCount+1)
@@ -365,7 +267,7 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 				}
 			}
 		} else {
-			w.ackFailed(ctx, msg, "SEND_FAILED", err.Error())
+			w.ackFailed(msg, "SEND_FAILED", err.Error())
 		}
 		if w.metrics != nil {
 			w.metrics.RecordMessageFailed(msg.TenantID, *msg.ConnectorID, "SEND_FAILED")
@@ -373,7 +275,7 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 		return
 	}
 
-	if err := w.queueRepo.AckSent(ctx, msg.ID, int(msg.Version), result.ExternalID, result.Parts, result.Price, result.Cost); err != nil {
+	if err := w.queueRepo.AckSent(w.ctx, msg.ID, int(msg.Version), result.ExternalID, result.Parts, result.Price, result.Cost); err != nil {
 		logger.Error("ack sent", "error", err)
 		return
 	}
@@ -391,29 +293,48 @@ func (w *QueueWorker) processMessage(ctx context.Context, msg domain.Message) {
 	w.lastSuccessTime.Store(time.Now())
 }
 
-func (w *QueueWorker) ackFailed(ctx context.Context, msg domain.Message, errorCode, errorMessage string) {
-	if err := w.queueRepo.AckFailed(ctx, msg.ID, int(msg.Version), errorCode, errorMessage); err != nil {
+func (w *QueueWorker) ackFailed(msg domain.Message, errorCode, errorMessage string) {
+	if err := w.queueRepo.AckFailed(w.ctx, msg.ID, int(msg.Version), errorCode, errorMessage); err != nil {
 		slog.Error("ack failed", "message_id", msg.ID, "error", err)
 	}
 }
 
-// isClosed reports whether a channel is closed.
-func isClosed(ch <-chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
+func (w *QueueWorker) IsHealthy() error {
+	if !w.running.Load() {
+		return fmt.Errorf("queue worker is not running")
 	}
+	// Check for unhealthy idle periods
+	if v, ok := w.lastSuccessTime.Load().(time.Time); ok && !v.IsZero() {
+		if time.Since(v) > healthyIdleThreshold {
+			return fmt.Errorf("queue worker idle for %v (threshold: %v)",
+				time.Since(v).Round(time.Second), healthyIdleThreshold)
+		}
+	}
+	return nil
 }
 
-func nullTime(t time.Time) *time.Time {
-	if t.IsZero() {
-		return nil
+func (w *QueueWorker) HealthDetail() map[string]interface{} {
+	var lastPanic, lastSuccess, lastBatchEnd time.Time
+	if v, ok := w.lastPanicTime.Load().(time.Time); ok {
+		lastPanic = v
 	}
-	return &t
-}
-
-func durationMillis(ns int64) float64 {
-	return float64(ns) / 1e6
+	if v, ok := w.lastSuccessTime.Load().(time.Time); ok {
+		lastSuccess = v
+	}
+	if v, ok := w.lastBatchEndTime.Load().(time.Time); ok {
+		lastBatchEnd = v
+	}
+	return map[string]interface{}{
+		"type":               "queue_worker",
+		"alive":              w.running.Load(),
+		"stopped":            isClosed(w.stopCh),
+		"restart_count":      w.restartCnt.Load(),
+		"batch_size":         w.batchSize,
+		"poll_interval":      w.pollInterval.String(),
+		"last_panic_at":      nullTime(lastPanic),
+		"last_success_at":    nullTime(lastSuccess),
+		"last_batch_at":      nullTime(lastBatchEnd),
+		"last_batch_msgs":    w.lastBatchMsgCnt.Load(),
+		"last_batch_duration": durationMillis(w.lastBatchDur.Load()),
+	}
 }

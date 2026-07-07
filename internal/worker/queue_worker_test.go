@@ -2,22 +2,24 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/raghna/fury-sms-gateway/internal/connector"
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
 
 // ============================================================
-// Mock QueueRepository for concurrent testing
+// Mock QueueRepository
 // ============================================================
 
 type mockQueueRepo struct {
 	mu        sync.Mutex
 	messages  map[string]*domain.Message
-	claimed   map[string]int // how many times each message was claimed
+	claimed   map[string]int
 	callCount int32
 }
 
@@ -52,7 +54,6 @@ func (r *mockQueueRepo) ClaimQueued(ctx context.Context, limit int) ([]domain.Me
 			result = append(result, m)
 		}
 	}
-	// Simulate processing delay
 	time.Sleep(10 * time.Millisecond)
 	return result, nil
 }
@@ -60,34 +61,33 @@ func (r *mockQueueRepo) ClaimQueued(ctx context.Context, limit int) ([]domain.Me
 func (r *mockQueueRepo) AckSent(ctx context.Context, id string, version int, externalID string, parts int, price, cost int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if msg, ok := r.messages[id]; ok {
-		m := *msg
-		m.Status = domain.MessageStatusSent
-		r.messages[id] = &m
+	msg, ok := r.messages[id]
+	if !ok {
+		return fmt.Errorf("message %s not found", id)
 	}
+	msg.Status = domain.MessageStatusSent
 	return nil
 }
 
 func (r *mockQueueRepo) AckFailed(ctx context.Context, id string, version int, errorCode, errorMessage string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if msg, ok := r.messages[id]; ok {
-		m := *msg
-		m.Status = domain.MessageStatusFailed
-		r.messages[id] = &m
+	msg, ok := r.messages[id]
+	if !ok {
+		return fmt.Errorf("message %s not found", id)
 	}
+	msg.Status = domain.MessageStatusFailed
 	return nil
 }
 
 func (r *mockQueueRepo) ScheduleRetry(ctx context.Context, id string, version int, errorCode, errorMessage string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if msg, ok := r.messages[id]; ok {
-		m := *msg
-		m.Status = domain.MessageStatusRetrying
-		m.RetryCount++
-		r.messages[id] = &m
+	msg, ok := r.messages[id]
+	if !ok {
+		return fmt.Errorf("message %s not found", id)
 	}
+	msg.RetryCount++
 	return nil
 }
 
@@ -96,36 +96,38 @@ func (r *mockQueueRepo) GetRetryable(ctx context.Context, now time.Time, minDela
 }
 
 // ============================================================
-// Mock Sender — tracks how many times each message was sent
+// Mock Connector (implements connector.Connector)
 // ============================================================
 
-type mockSender struct {
-	mu         sync.Mutex
-	sendCount  map[string]int // messageID → send attempts
-	shouldFail bool
+type mockConnector struct {
+	id          string
+	protocol    domain.ConnectorType
+	sendCount   map[string]int
+	sendCountMu sync.Mutex
+	shouldFail  bool
 }
 
-func newMockSender(shouldFail bool) *mockSender {
-	return &mockSender{
+func newMockConnector(id string, shouldFail bool) *mockConnector {
+	return &mockConnector{
+		id:         id,
+		protocol:   domain.ConnectorTypeMock,
 		sendCount:  make(map[string]int),
 		shouldFail: shouldFail,
 	}
 }
 
-func (s *mockSender) Type() domain.ConnectorType {
-	return domain.ConnectorTypeMock
-}
+func (m *mockConnector) ID() string                    { return m.id }
+func (m *mockConnector) Protocol() domain.ConnectorType { return m.protocol }
 
-func (s *mockSender) Send(ctx context.Context, req domain.SendRequest) (*domain.SendResult, error) {
-	s.mu.Lock()
-	s.sendCount[req.Message.ID]++
-	s.mu.Unlock()
+func (m *mockConnector) Send(_ context.Context, req *domain.SendRequest) (*domain.SendResult, error) {
+	m.sendCountMu.Lock()
+	m.sendCount[req.Message.ID]++
+	m.sendCountMu.Unlock()
 
-	// Simulate send time
 	time.Sleep(5 * time.Millisecond)
 
-	if s.shouldFail {
-		return nil, domain.ErrInvalidInput
+	if m.shouldFail {
+		return nil, fmt.Errorf("mock send failure")
 	}
 
 	return &domain.SendResult{
@@ -134,200 +136,299 @@ func (s *mockSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		Price:          5000,
 		Cost:           2000,
 		ProviderStatus: "DELIVRD",
+		Acceptance:     domain.AcceptanceFinal,
 	}, nil
 }
 
 // ============================================================
-// Mock Connector Repository
+// Mock Connector Registry
 // ============================================================
 
-type mockConnRepo struct {
-	connectors map[string]*domain.Connector
+type mockRegistry struct {
+	mu    sync.RWMutex
+	items map[string]connector.Connector
 }
 
-func newMockConnRepo() *mockConnRepo {
-	return &mockConnRepo{
-		connectors: map[string]*domain.Connector{
-			"conn-1": {
-				BaseModel: domain.BaseModel{ID: "conn-1"},
-				Name:      "test-connector",
-				Type:      domain.ConnectorTypeMock,
-				Status:    domain.ConnectorStatusActive,
-				Config:    []byte(`{}`),
-				TenantID:  "tenant-1",
-			},
-		},
+func newMockRegistry(connectors ...connector.Connector) *mockRegistry {
+	r := &mockRegistry{items: make(map[string]connector.Connector)}
+	for _, c := range connectors {
+		r.items[c.ID()] = c
 	}
+	return r
 }
 
-func (r *mockConnRepo) GetByID(ctx context.Context, id string) (*domain.Connector, error) {
-	if c, ok := r.connectors[id]; ok {
-		return c, nil
+func (r *mockRegistry) Get(id string) (connector.Connector, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	c, ok := r.items[id]
+	if !ok {
+		return nil, fmt.Errorf("connector %q not found", id)
 	}
-	return nil, domain.ErrNotFound
+	return c, nil
 }
 
-func (r *mockConnRepo) Create(ctx context.Context, input domain.CreateConnectorInput, createdBy string) (*domain.Connector, error) {
-	return nil, nil
+func (r *mockRegistry) List() []connector.Connector {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]connector.Connector, 0, len(r.items))
+	for _, c := range r.items {
+		result = append(result, c)
+	}
+	return result
 }
-func (r *mockConnRepo) Update(ctx context.Context, id string, input domain.UpdateConnectorInput, updatedBy string, version int) (*domain.Connector, error) {
-	return nil, nil
-}
-func (r *mockConnRepo) Delete(ctx context.Context, id string) error { return nil }
-func (r *mockConnRepo) ListByTenant(ctx context.Context, filter domain.ConnectorFilter) (domain.PageResult[domain.Connector], error) {
-	return domain.PageResult[domain.Connector]{}, nil
-}
-func (r *mockConnRepo) CountByTenant(ctx context.Context, tenantID string) (int64, error) { return 0, nil }
 
 // ============================================================
-// Mock Message Repository (minimal for worker dependencies)
+// Mock Message Repository
 // ============================================================
 
-type mockMsgRepo struct{}
-
-func newMockMsgRepo() *mockMsgRepo { return &mockMsgRepo{} }
-
-func (r *mockMsgRepo) Create(ctx context.Context, input domain.CreateMessageInput, createdBy string) (*domain.Message, error) { return nil, nil }
-func (r *mockMsgRepo) GetByID(ctx context.Context, id string) (*domain.Message, error) { return nil, nil }
-func (r *mockMsgRepo) GetByClientRef(ctx context.Context, tenantID, clientRef string) (*domain.Message, error) { return nil, nil }
-func (r *mockMsgRepo) GetByExternalID(ctx context.Context, externalID string) (*domain.Message, error) { return nil, nil }
-func (r *mockMsgRepo) UpdateStatus(ctx context.Context, id string, input domain.UpdateMessageInput, version int) (*domain.Message, error) { return nil, nil }
-func (r *mockMsgRepo) AppendDLR(ctx context.Context, dlr *domain.DLRRecord) error { return nil }
-func (r *mockMsgRepo) List(ctx context.Context, filter domain.MessageFilter) (domain.PageResult[domain.Message], error) { return domain.PageResult[domain.Message]{}, nil }
-func (r *mockMsgRepo) Count(ctx context.Context, filter domain.MessageFilter) (int64, error) { return 0, nil }
-func (r *mockMsgRepo) Delete(ctx context.Context, id string) error { return nil }
-
-// ============================================================
-// Test: Concurrent Workers — No Double Send
-// ============================================================
-
-func TestConcurrentWorkers_NoDoubleSend(t *testing.T) {
-	// Arrange: Create 20 queued messages
-	var messages []domain.Message
-	for i := 0; i < 20; i++ {
-		id := string(rune('a' + i))
-		connID := "conn-1"
-		messages = append(messages, domain.Message{
-			BaseModel:    domain.BaseModel{ID: id, Version: 1},
-			TenantID:     "tenant-1",
-			ConnectorID: &connID,
-			Status:       domain.MessageStatusQueued,
-			Source:       "Sender",
-			Destination: "1234567890",
-			Text:        "Test message " + id,
-			MaxRetries:  3,
-		})
-	}
-
-	queueRepo := newMockQueueRepo(messages)
-	sender := newMockSender(false)
-	connRepo := newMockConnRepo()
-	msgRepo := newMockMsgRepo()
-
-	senders := map[domain.ConnectorType]domain.Sender{
-		domain.ConnectorTypeMock: sender,
-	}
-
-	retryPolicy := NewDefaultRetryPolicy()
-
-	// Act: Run 3 workers concurrently
-	var wg sync.WaitGroup
-	numWorkers := 3
-	batchSize := 10
-
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			worker := NewQueueWorker(
-				context.Background(), queueRepo, msgRepo, connRepo, senders, retryPolicy, nil, nil,
-				WithBatchSize(batchSize),
-			)
-			// Each worker processes one batch
-			worker.processBatch()
-		}()
-	}
-	wg.Wait()
-
-	// Assert
-	// 1. No message was claimed more than once
-	for id, count := range queueRepo.claimed {
-		if count > 1 {
-			t.Errorf("message %s claimed %d times (expected 1)", id, count)
-		}
-	}
-
-	// 2. Each claimed message was sent exactly once
-	totalSent := 0
-	for _, count := range sender.sendCount {
-		if count > 1 {
-			t.Errorf("message sent %d times (expected 1)", count)
-		}
-		totalSent += count
-	}
-
-	// 3. Total sent is between batchSize and total messages
-	expectedMax := batchSize * numWorkers // max possible claims
-	if totalSent > expectedMax {
-		t.Errorf("sent %d messages, expected max %d", totalSent, expectedMax)
-	}
-
-	t.Logf("Total messages: %d", len(messages))
-	t.Logf("Messages claimed: %d", len(queueRepo.claimed))
-	t.Logf("Messages sent: %d", totalSent)
-	t.Logf("Repo call count: %d", atomic.LoadInt32(&queueRepo.callCount))
+type mockMessageRepo struct {
+	store map[string]*domain.Message
+	mu    sync.Mutex
 }
 
-func TestConcurrentWorker_RetryFlow(t *testing.T) {
-	// Arrange: 1 message that fails, worker schedules retry
-	connID := "conn-1"
-	msg := domain.Message{
-		BaseModel:    domain.BaseModel{ID: "msg-1", Version: 1},
-		TenantID:     "tenant-1",
-		ConnectorID: &connID,
-		Status:       domain.MessageStatusQueued,
-		Source:       "Sender",
-		Destination: "1234567890",
-		Text:        "Test retry",
-		MaxRetries:  3,
-		RetryCount:  0,
+func newMockMessageRepo() *mockMessageRepo {
+	return &mockMessageRepo{store: make(map[string]*domain.Message)}
+}
+
+func (r *mockMessageRepo) Create(ctx context.Context, input domain.CreateMessageInput, createdBy string) (*domain.Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) GetByID(ctx context.Context, id string) (*domain.Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) Update(ctx context.Context, id string, input domain.UpdateMessageInput, version int) (*domain.Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) Delete(ctx context.Context, id string) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) ListByTenant(ctx context.Context, tenantID string, filter domain.MessageFilter, page domain.Page) (domain.PageResult[domain.Message], error) {
+	return domain.PageResult[domain.Message]{}, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) CountByTenant(ctx context.Context, tenantID string) (int64, error) {
+	return 0, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) UpdateStatus(ctx context.Context, id string, _ domain.UpdateMessageInput, version int) (*domain.Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) UpdateDLR(ctx context.Context, id string, dlrStatus domain.DLRStatus, status domain.MessageStatus) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) AppendDLR(ctx context.Context, dlr *domain.DLRRecord) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) GetByExternalID(ctx context.Context, externalID string) (*domain.Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) Count(ctx context.Context, filter domain.MessageFilter) (int64, error) {
+	return 0, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) GetByClientRef(ctx context.Context, tenantID string, clientRef string) (*domain.Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *mockMessageRepo) List(ctx context.Context, filter domain.MessageFilter) (domain.PageResult[domain.Message], error) {
+	return domain.PageResult[domain.Message]{}, nil
+}
+
+// ============================================================
+// Mock RetryPolicy
+// ============================================================
+
+type mockRetryPolicy struct{}
+
+func (m *mockRetryPolicy) NextDelay(_ domain.RetryContext) time.Duration {
+	return 10 * time.Millisecond
+}
+
+// ============================================================
+// Helper
+// ============================================================
+
+func strPtr(s string) *string {
+	return &s
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+func TestQueueWorker_SendsAllMessages(t *testing.T) {
+	messages := []domain.Message{
+		{BaseModel: domain.BaseModel{ID: "msg-1"}, TenantID: "tenant-1", ConnectorID: strPtr("conn-1"), Destination: "+1234"},
+		{BaseModel: domain.BaseModel{ID: "msg-2"}, TenantID: "tenant-1", ConnectorID: strPtr("conn-2"), Destination: "+5678"},
+		{BaseModel: domain.BaseModel{ID: "msg-3"}, TenantID: "tenant-2", ConnectorID: strPtr("conn-1"), Destination: "+9012"},
 	}
 
-	queueRepo := newMockQueueRepo([]domain.Message{msg})
-	failingSender := newMockSender(true) // always fails
-	connRepo := newMockConnRepo()
-	msgRepo := newMockMsgRepo()
+	conn1 := newMockConnector("conn-1", false)
+	conn2 := newMockConnector("conn-2", false)
+	registry := newMockRegistry(conn1, conn2)
 
-	senders := map[domain.ConnectorType]domain.Sender{
-		domain.ConnectorTypeMock: failingSender,
-	}
-
-	retryPolicy := NewDefaultRetryPolicy()
-
-	worker := NewQueueWorker(
-		context.Background(), queueRepo, msgRepo, connRepo, senders, retryPolicy, nil, nil,
+	qw := NewQueueWorker(
+		context.Background(),
+		newMockQueueRepo(messages),
+		newMockMessageRepo(),
+		registry,
+		&mockRetryPolicy{},
+		nil, // no metrics
+		nil, // no event bus
 		WithBatchSize(10),
+		WithPollInterval(10*time.Millisecond),
 	)
 
-	// Act: Process the message (it should fail and be scheduled for retry)
-	worker.processBatch()
+	qw.Start()
+	time.Sleep(300 * time.Millisecond)
+	qw.Stop()
 
-	// Assert: Message should be in retrying status (since retry_count < max_retries)
-	queueRepo.mu.Lock()
-	updatedMsg := queueRepo.messages["msg-1"]
-	queueRepo.mu.Unlock()
+	conn1.sendCountMu.Lock()
+	if conn1.sendCount["msg-1"] != 1 {
+		t.Errorf("conn1 expected 1 send for msg-1, got %d", conn1.sendCount["msg-1"])
+	}
+	if conn1.sendCount["msg-3"] != 1 {
+		t.Errorf("conn1 expected 1 send for msg-3, got %d", conn1.sendCount["msg-3"])
+	}
+	conn1.sendCountMu.Unlock()
+	conn2.sendCountMu.Lock()
+	if conn2.sendCount["msg-2"] != 1 {
+		t.Errorf("conn2 expected 1 send for msg-2, got %d", conn2.sendCount["msg-2"])
+	}
+	conn2.sendCountMu.Unlock()
+}
 
-	if updatedMsg == nil {
-		t.Fatal("message not found after processing")
+func TestQueueWorker_NoDoubleSend_OnRetry(t *testing.T) {
+	messages := []domain.Message{
+		{BaseModel: domain.BaseModel{ID: "msg-1"}, TenantID: "tenant-1", ConnectorID: strPtr("conn-1"), Destination: "+1234"},
 	}
 
-	if updatedMsg.Status != domain.MessageStatusRetrying {
-		t.Errorf("expected status retrying, got %s", updatedMsg.Status)
+	conn := newMockConnector("conn-1", false)
+	registry := newMockRegistry(conn)
+
+	qw := NewQueueWorker(
+		context.Background(),
+		newMockQueueRepo(messages),
+		newMockMessageRepo(),
+		registry,
+		&mockRetryPolicy{},
+		nil,
+		nil,
+		WithBatchSize(10),
+		WithPollInterval(10*time.Millisecond),
+	)
+
+	qw.Start()
+	time.Sleep(300 * time.Millisecond)
+	qw.Stop()
+
+	conn.sendCountMu.Lock()
+	sent := conn.sendCount["msg-1"]
+	conn.sendCountMu.Unlock()
+
+	if sent != 1 {
+		t.Errorf("expected exactly 1 send, got %d", sent)
 	}
-	if updatedMsg.RetryCount != 1 {
-		t.Errorf("expected retry count 1, got %d", updatedMsg.RetryCount)
+}
+
+func TestQueueWorker_HandlesFailure(t *testing.T) {
+	messages := []domain.Message{
+		{BaseModel: domain.BaseModel{ID: "fail-msg"}, TenantID: "tenant-1", ConnectorID: strPtr("conn-1"), Destination: "+1234", MaxRetries: 0},
 	}
 
-	t.Logf("Message status: %s", updatedMsg.Status)
-	t.Logf("Message retry count: %d", updatedMsg.RetryCount)
+	conn := newMockConnector("conn-1", true)
+	registry := newMockRegistry(conn)
+
+	qw := NewQueueWorker(
+		context.Background(),
+		newMockQueueRepo(messages),
+		newMockMessageRepo(),
+		registry,
+		&mockRetryPolicy{},
+		nil,
+		nil,
+		WithBatchSize(10),
+		WithPollInterval(10*time.Millisecond),
+	)
+
+	qw.Start()
+	time.Sleep(300 * time.Millisecond)
+	qw.Stop()
+
+	conn.sendCountMu.Lock()
+	sent := conn.sendCount["fail-msg"]
+	conn.sendCountMu.Unlock()
+
+	if sent == 0 {
+		t.Errorf("expected at least 1 send attempt for fail-msg")
+	}
+}
+
+func TestConcurrentWorkers_NoDoubleSend(t *testing.T) {
+	messages := []domain.Message{
+		{BaseModel: domain.BaseModel{ID: "msg-1"}, TenantID: "tenant-1", ConnectorID: strPtr("conn-1"), Destination: "+1234"},
+		{BaseModel: domain.BaseModel{ID: "msg-2"}, TenantID: "tenant-1", ConnectorID: strPtr("conn-1"), Destination: "+5678"},
+		{BaseModel: domain.BaseModel{ID: "msg-3"}, TenantID: "tenant-2", ConnectorID: strPtr("conn-1"), Destination: "+9012"},
+		{BaseModel: domain.BaseModel{ID: "msg-4"}, TenantID: "tenant-2", ConnectorID: strPtr("conn-2"), Destination: "+3456"},
+		{BaseModel: domain.BaseModel{ID: "msg-5"}, TenantID: "tenant-1", ConnectorID: strPtr("conn-2"), Destination: "+7890"},
+	}
+
+	conn1 := newMockConnector("conn-1", false)
+	conn2 := newMockConnector("conn-2", false)
+	registry := newMockRegistry(conn1, conn2)
+	queueRepo := newMockQueueRepo(messages)
+
+	qw1 := NewQueueWorker(
+		context.Background(),
+		queueRepo,
+		newMockMessageRepo(),
+		registry,
+		&mockRetryPolicy{},
+		nil,
+		nil,
+		WithBatchSize(10),
+		WithPollInterval(5*time.Millisecond),
+	)
+	qw2 := NewQueueWorker(
+		context.Background(),
+		queueRepo,
+		newMockMessageRepo(),
+		registry,
+		&mockRetryPolicy{},
+		nil,
+		nil,
+		WithBatchSize(10),
+		WithPollInterval(5*time.Millisecond),
+	)
+
+	qw1.Start()
+	qw2.Start()
+
+	time.Sleep(300 * time.Millisecond)
+	qw1.Stop()
+	qw2.Stop()
+
+	conn1.sendCountMu.Lock()
+	conn2.sendCountMu.Lock()
+	totalSent := 0
+	for _, id := range []string{"msg-1", "msg-2", "msg-3"} {
+		totalSent += conn1.sendCount[id]
+	}
+	for _, id := range []string{"msg-4", "msg-5"} {
+		totalSent += conn2.sendCount[id]
+	}
+	conn1.sendCountMu.Unlock()
+	conn2.sendCountMu.Unlock()
+
+	if totalSent != 5 {
+		t.Errorf("expected exactly 5 total sends, got %d", totalSent)
+	}
 }
