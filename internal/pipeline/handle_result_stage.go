@@ -103,5 +103,12 @@ func (s *HandleResultStage) Process(ctx context.Context, state *PipelineState) (
 	}
 
 	state.DeliveryOutcome = &outcome
+
+	// DeliveryOutcome is now the single source of truth for downstream.
+	// Clear SendResult and Decision so any stage accidentally reading them
+	// after this point fails fast (nil pointer dereference in tests).
+	state.SendResult = nil
+	state.Decision = nil
+
 	return state, nil
 }

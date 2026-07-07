@@ -294,7 +294,7 @@ func TestHandleResultStage_UnknownAcceptance(t *testing.T) {
 	}
 }
 
-func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
+func TestHandleResultStage_ClearsSendResultAndDecision(t *testing.T) {
 	msg := &domain.Message{Text: "hello", RetryCount: 0, MaxRetries: 3}
 	prepared := &domain.PreparedMessage{Destination: "+1234", Encoding: "GSM7", Parts: 1}
 	decision := &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
@@ -316,17 +316,19 @@ func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// DeliveryOutcome is now the single source of truth.
+	// SendResult and Decision are nil-ed so downstream stages can't use them.
 	if state.Message.Text != "hello" {
 		t.Error("Message was modified")
 	}
 	if state.Prepared != prepared {
 		t.Error("Prepared was replaced")
 	}
-	if state.Decision != decision {
-		t.Error("Decision was replaced")
+	if state.Decision != nil {
+		t.Error("Decision should be nil after HandleResultStage (copied to DeliveryOutcome)")
 	}
-	if state.SendResult != sr {
-		t.Error("SendResult was replaced")
+	if state.SendResult != nil {
+		t.Error("SendResult should be nil after HandleResultStage (copied to DeliveryOutcome)")
 	}
 	if state.DeliveryOutcome == nil {
 		t.Error("DeliveryOutcome was not set")
