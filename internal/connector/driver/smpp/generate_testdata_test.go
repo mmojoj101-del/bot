@@ -35,7 +35,7 @@ func TestGenerateTestdata(t *testing.T) {
 			pdu: &BindTransceiver{
 				Hdr:              Header{CommandID: CommandIDBindTransceiver, SequenceNumber: 1},
 				SystemID:         "test-system",
-				Password:         "testpass",
+				Password:         "test-secret",
 				SystemType:       "vms",
 				InterfaceVersion: 0x34,
 				AddrTON:          1,

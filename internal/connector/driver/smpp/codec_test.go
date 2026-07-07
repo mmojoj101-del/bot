@@ -109,7 +109,7 @@ func TestBindTransceiverRoundTrip(t *testing.T) {
 	roundTrip(t, &BindTransceiver{
 		Hdr:              Header{CommandID: CommandIDBindTransceiver, SequenceNumber: 1},
 		SystemID:          "test-system",
-		Password:          "secret",
+		Password:          "test-credential",
 		SystemType:        "vms",
 		InterfaceVersion:  0x34,
 		AddrTON:           1,

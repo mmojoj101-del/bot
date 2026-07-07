@@ -10,31 +10,47 @@ import (
 // The header has already been parsed and is passed for context.
 type DecoderFunc func(hdr *Header, body []byte) (PDU, error)
 
-var decoders = map[CommandID]DecoderFunc{
-	CommandIDBindTransceiver:    decodeBindTransceiver,
-	CommandIDBindTransceiverResp: decodeBindTransceiverResp,
-	CommandIDSubmitSM:           decodeSubmitSM,
-	CommandIDSubmitSMResp:       decodeSubmitSMResp,
-	CommandIDDeliverSM:          decodeDeliverSM,
-	CommandIDDeliverSMResp:      decodeDeliverSMResp,
-	CommandIDEnquireLink:        decodeEnquireLink,
-	CommandIDEnquireLinkResp:    decodeEnquireLinkResp,
-	CommandIDUnbind:             decodeUnbind,
-	CommandIDUnbindResp:         decodeUnbindResp,
-	CommandIDGenericNack:        decodeGenericNack,
-}
-
 // ── Codec ────────────────────────────────────────────────────────────────────
 
 // Codec handles SMPP PDU binary encoding and decoding.
 // It is protocol-pure: no knowledge of Session, Window, or Transport.
+//
+// Decoder registry is per-instance (not global), allowing registration of
+// vendor-specific or custom PDUs without modifying the codec.
 type Codec struct {
-	Version Version
+	Version   Version
+	decoders  map[CommandID]DecoderFunc
 }
 
-// NewCodec creates a Codec for the given SMPP version.
+// NewCodec creates a Codec for the given SMPP version,
+// pre-loaded with all standard SMPP v3.4 decoders.
 func NewCodec(version Version) *Codec {
-	return &Codec{Version: version}
+	c := &Codec{
+		Version:  version,
+		decoders: make(map[CommandID]DecoderFunc),
+	}
+	// Register all standard decoders
+	c.RegisterDecoder(CommandIDGenericNack, decodeGenericNack)
+	c.RegisterDecoder(CommandIDEnquireLink, decodeEnquireLink)
+	c.RegisterDecoder(CommandIDEnquireLinkResp, decodeEnquireLinkResp)
+	c.RegisterDecoder(CommandIDUnbind, decodeUnbind)
+	c.RegisterDecoder(CommandIDUnbindResp, decodeUnbindResp)
+	c.RegisterDecoder(CommandIDBindTransceiver, decodeBindTransceiver)
+	c.RegisterDecoder(CommandIDBindTransceiverResp, decodeBindTransceiverResp)
+	c.RegisterDecoder(CommandIDSubmitSM, decodeSubmitSM)
+	c.RegisterDecoder(CommandIDSubmitSMResp, decodeSubmitSMResp)
+	c.RegisterDecoder(CommandIDDeliverSM, decodeDeliverSM)
+	c.RegisterDecoder(CommandIDDeliverSMResp, decodeDeliverSMResp)
+	return c
+}
+
+// RegisterDecoder registers a decoder function for the given command ID.
+// If a decoder already exists, it is overwritten. This enables:
+//   - Vendor-specific PDU types
+//   - SMPP 5.0 extended PDUs
+//   - Plugin-based decoders
+func (c *Codec) RegisterDecoder(cmd CommandID, fn DecoderFunc) {
+	c.decoders[cmd] = fn
 }
 
 // Decode parses a complete SMPP PDU from binary data.
@@ -49,7 +65,7 @@ func (c *Codec) Decode(data []byte) (PDU, error) {
 	}
 
 	body := data[16:hdr.Length]
-	decoder, ok := decoders[hdr.CommandID]
+	decoder, ok := c.decoders[hdr.CommandID]
 	if !ok {
 		// Unknown command — preserve raw body for debugging
 		return &GenericPDU{Hdr: *hdr, RawBody: body}, nil
