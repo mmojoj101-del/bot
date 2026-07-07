@@ -82,19 +82,14 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		return nil, fmt.Errorf("parse connector config: %w", err)
 	}
 
-	// Determine encoding and destination from req.Prepared (set by pipeline)
-	encoding := ""
-	destination := ""
-	if req.Prepared != nil {
-		encoding = req.Prepared.Encoding
-		destination = req.Prepared.Destination
+	// Prepared is required — set by the pipeline's PrepareStage.
+	// Fail fast if missing: raw send bypasses preparation (encoding, normalization).
+	if req.Prepared == nil {
+		return nil, fmt.Errorf("missing prepared message: pipeline must call PrepareStage before SendStage")
 	}
-	if encoding == "" {
-		encoding = string(req.Message.Encoding)
-	}
-	if destination == "" {
-		destination = req.Message.Destination
-	}
+
+	encoding := req.Prepared.Encoding
+	destination := req.Prepared.Destination
 
 	// Build request body from cached template
 	body, err := s.buildBody(cfg.BodyTemplate, req.Message, encoding, destination)
@@ -188,13 +183,10 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 	externalID := extractField(respBody, cfg.ExternalIDPath)
 	providerStatus := extractField(respBody, cfg.StatusPath)
 
-	// Use pre-calculated parts from pipeline, or fall back to counting
-	parts := 0
-	if req.Prepared != nil {
-		parts = req.Prepared.Parts
-	}
+	// Parts from pipeline (PreparedMessage). Fail fast if zero — means pipeline didn't run.
+	parts := req.Prepared.Parts
 	if parts <= 0 {
-		parts = countSMSParts(req.Message.Text, req.Message.Encoding)
+		return nil, fmt.Errorf("invalid parts count in prepared message: %d", req.Prepared.Parts)
 	}
 	price := int64(parts) * 5000 // placeholder: 0.05 per part
 

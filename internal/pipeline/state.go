@@ -4,30 +4,24 @@ import (
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
 
-// PipelineState is the single object passed through all pipeline stages.
-// It carries everything a stage needs and accumulates results.
 // PipelineState carries message context through all pipeline stages.
 // Each stage reads from relevant fields and populates its output field.
-// Fields are deliberately typed — no map[string]interface{} junk drawer.
+// Fields are deliberately typed — no map[string]any, no Error duplication.
+// Prepared is a value type (copy on assignment) to prevent mutation.
 type PipelineState struct {
 	// Message is the canonical domain message being processed. Immutable in the pipeline.
 	Message *domain.Message
 
 	// Prepared is the output of PrepareStage (normalized destination, encoding, parts).
-	Prepared *domain.PreparedMessage
+	// Value type — any stage that reads it gets a copy.
+	Prepared domain.PreparedMessage
 
-	// Decision is the routing decision (set by RouteStage, never modified after).
+	// Decision is the routing decision set by RouteStage (pointer = nil when undecided).
+	// After RouteStage: treat as immutable — do not modify its fields.
 	Decision *RoutingDecision
 
 	// SendResult is the result from the connector (set by SendStage).
 	SendResult *SendResult
-
-	// Attempt is the current retry attempt (0 = first attempt).
-	// Managed by the retry decorator wrapping the pipeline, not by pipeline stages.
-	Attempt int
-
-	// MaxRetries is the maximum number of retry attempts.
-	MaxRetries int
 
 	// TraceID is the cross-lifecycle trace identifier.
 	TraceID string
@@ -67,9 +61,7 @@ type SendResult struct {
 // NewPipelineState creates a new PipelineState for a message.
 func NewPipelineState(msg *domain.Message, traceID string) *PipelineState {
 	return &PipelineState{
-		Message:    msg,
-		TraceID:    traceID,
-		Attempt:    0,
-		MaxRetries: 3,
+		Message: msg,
+		TraceID: traceID,
 	}
 }

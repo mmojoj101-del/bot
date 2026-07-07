@@ -157,7 +157,5 @@ func validState() *PipelineState {
 			Text:        "Hello, World!",
 			Status:      domain.MessageStatusQueued,
 		},
-		Attempt:    0,
-		MaxRetries: 3,
 	}
 }

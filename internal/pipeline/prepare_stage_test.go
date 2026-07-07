@@ -18,8 +18,8 @@ func TestPrepareStage_ValidMessageGSM7(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if result.Prepared == nil {
-		t.Fatal("expected SendRequest to be set")
+	if result.Prepared.Destination == "" {
+		t.Fatal("expected Prepared to be set")
 	}
 	if result.Prepared.Encoding != "GSM7" {
 		t.Fatalf("expected GSM7 encoding, got %q", result.Prepared.Encoding)
@@ -176,8 +176,8 @@ func TestPrepareStage_PhoneNormalization(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error for %q: %v", tt.input, err)
 			}
-			if result.Prepared == nil {
-				t.Fatal("expected SendRequest")
+			if result.Prepared.Destination == "" {
+				t.Fatal("expected Prepared")
 			}
 			if result.Prepared.Destination != tt.expected {
 				t.Fatalf("expected %q, got %q", tt.expected, result.Prepared.Destination)
@@ -218,8 +218,8 @@ func TestPipeline_ValidateThenPrepare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected pipeline to succeed, got: %v", err)
 	}
-	if state.Prepared == nil {
-		t.Fatal("expected SendRequest after Prepare stage")
+	if state.Prepared.Destination == "" {
+		t.Fatal("expected Prepared after Prepare stage")
 	}
 	if state.Prepared.Encoding != "GSM7" {
 		t.Fatalf("expected GSM7 encoding, got %q", state.Prepared.Encoding)

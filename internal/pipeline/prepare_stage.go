@@ -108,7 +108,7 @@ func (s *PrepareStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 	//    Only derived values that cannot live on domain.Message go here.
 	//    domain.SendRequest carries them (Message + Destination/Encoding/Parts)
 	//    to the sender in the next stage.
-	state.Prepared = &PreparedMessage{
+	state.Prepared = PreparedMessage{
 		Destination: dest,
 		Encoding:    encoding,
 		Parts:       parts,
