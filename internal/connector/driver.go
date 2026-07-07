@@ -104,22 +104,37 @@ type TransportResponse struct {
 
 // StatefulDriver is an OPTIONAL interface that stateful protocol drivers
 // (SMPP, SIP) may implement on top of ProtocolDriver.
-// GenericConnector checks via type assertion and calls lifecycle methods
-// when the connector starts or is removed.
+// GenericConnector checks via type assertion at init time and caches the
+// reference in driverHooks — zero type-assertion overhead at runtime.
 //
-// Stateless drivers (HTTP) don't need this.
+// Concurrency contract (ALL implementors MUST satisfy):
+//   - Connect(), Disconnect(), and IsConnected() must be safe for concurrent
+//     calls. GenericConnector serializes them with sessionMu, but the driver
+//     must not rely on external serialization for internal state safety.
+//   - IsConnected() must return a consistent result without blocking on I/O.
+//     Use atomic.Bool or a mutex-protected bool — never a raw bool.
+//   - Connect() may block for network I/O (TCP handshake, TLS, SMPP bind).
+//     GenericConnector never holds its core mutex during Connect/Disconnect.
+//   - If Connect() is called while already connected, the driver should
+//     return nil (idempotent). GenericConnector calls IsConnected() before
+//     Connect as a double-check, but a compliant driver handles this too.
+//   - If Disconnect() is called while not connected, return nil.
+//
+// Stateless drivers (HTTP) MUST NOT implement this interface.
 type StatefulDriver interface {
 	ProtocolDriver
 
-	// Connect establishes the session (TCP/TLS + bind for SMPP,
-	// registration for SIP). Called before the first Send.
+	// Connect establishes a session (TCP/TLS + bind for SMPP,
+	// registration for SIP). Must be idempotent: if already connected,
+	// return nil. May block for network I/O.
 	Connect(ctx context.Context) error
 
 	// Disconnect tears down the session gracefully.
-	// Called when the connector is removed or on graceful shutdown.
+	// Must be idempotent: if not connected, return nil.
 	Disconnect(ctx context.Context) error
 
 	// IsConnected returns true if the session is active.
+	// Must be safe for concurrent calls. Must not block on I/O.
 	IsConnected() bool
 }
 
