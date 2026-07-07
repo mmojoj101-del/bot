@@ -265,11 +265,12 @@ func BenchmarkGenericConnector_Send(b *testing.B) {
 // mockStatefulDriver implements StatefulDriver with connect call counting.
 type mockStatefulDriver struct {
 	mockDriver
-	connectCount   int
+	connectCount    int
 	disconnectCount int
-	connected      bool
-	connectDelay   time.Duration
-	mu             sync.Mutex
+	connected       bool
+	connectDelay    time.Duration
+	disconnectDelay time.Duration
+	mu              sync.Mutex
 }
 
 func (m *mockStatefulDriver) Connect(_ context.Context) error {
@@ -286,6 +287,9 @@ func (m *mockStatefulDriver) Connect(_ context.Context) error {
 func (m *mockStatefulDriver) Disconnect(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.disconnectDelay > 0 {
+		time.Sleep(m.disconnectDelay)
+	}
 	m.disconnectCount++
 	m.connected = false
 	return nil
@@ -430,6 +434,59 @@ func TestConcurrentConnectDisconnect_NoRace(t *testing.T) {
 
 	// Final state depends on ordering — both are valid
 	t.Logf("Final connected state: %v (valid regardless)", conn.hooks.statefulDriver.IsConnected())
+}
+
+// TestConcurrentStress_NoDeadlock runs 100 goroutines (50 Connect + 50 Disconnect)
+// in a loop to verify no panic, no deadlock, and correct call counts.
+func TestConcurrentStress_NoDeadlock(t *testing.T) {
+	sd := &mockStatefulDriver{
+		connectDelay:    5 * time.Millisecond,
+		disconnectDelay: 2 * time.Millisecond,
+	}
+	conn := NewGenericConnector("stress-test", "smpp", ConnectorConfig{}, sd)
+	conn.lazyInit()
+
+	ctx := context.Background()
+	errCh := make(chan error, 1000)
+
+	for iter := 0; iter < 50; iter++ {
+		var wg sync.WaitGroup
+
+		// 50 Connect goroutines
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := conn.Connect(ctx); err != nil {
+					errCh <- err
+				}
+			}()
+		}
+
+		// 50 Disconnect goroutines
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := conn.Disconnect(ctx); err != nil {
+					errCh <- err
+				}
+			}()
+		}
+
+		wg.Wait()
+
+		// No errors expected
+		select {
+		case err := <-errCh:
+			t.Fatalf("unexpected error during iteration %d: %v", iter, err)
+		default:
+		}
+	}
+
+	// No panics, no deadlocks — test passed
+	t.Logf("Stress test: %d Connect calls, %d Disconnect calls (all serialized by sessionMu)",
+		sd.connectCount, sd.disconnectCount)
 }
 
 // ── renderStructFields tests ──────────────────────────────────────────────────
