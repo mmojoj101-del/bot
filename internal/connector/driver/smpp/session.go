@@ -179,18 +179,18 @@ func NewSession(cfg SessionConfig) *Session {
 
 // ── Connect ──────────────────────────────────────────────────────────────────
 
-// Connect establishes a TCP connection, performs SMPP Bind, and starts
-// the Reader and Writer goroutines.
+// Connect establishes a TCP connection, starts internal goroutines, and
+// performs SMPP Bind via Session.Bind().
 //
 // Steps:
 //  1. dial addr
 //  2. create tcpTransport
 //  3. create + start WriteQueue
 //  4. create + start Reader
-//  5. send BindTransceiver via SendRequest
+//  5. Bind(ctx, bindPDU) — via Session.Bind (same SendRequest path)
 //  6. transition to Bound state
 //
-// On failure, cleans up partial state.
+// On failure, cleans up partial state (transport, goroutines, pending).
 func (s *Session) Connect(ctx context.Context, addr string, bindPDU *BindTransceiver) error {
 	if err := s.transitionTo(StateConnecting); err != nil {
 		return err
@@ -217,29 +217,12 @@ func (s *Session) Connect(ctx context.Context, addr string, bindPDU *BindTransce
 		s.reader.Start(s.ctx)
 	}()
 
-	// Send Bind
+	// Bind via Bind() — uniform SendRequest path
 	if err := s.transitionTo(StateBinding); err != nil {
 		s.cleanup()
 		return err
 	}
-
-	bindResp, err := s.SendRequest(ctx, bindPDU)
-	if err != nil {
-		s.cleanup()
-		return fmt.Errorf("smpp: bind: %w", err)
-	}
-
-	btr, ok := bindResp.(*BindTransceiverResp)
-	if !ok {
-		s.cleanup()
-		return fmt.Errorf("smpp: bind: unexpected response type %T", bindResp)
-	}
-	if !btr.Hdr.CommandStatus.IsOK() {
-		s.cleanup()
-		return fmt.Errorf("%w: %s", ErrBindFailed, btr.Hdr.CommandStatus)
-	}
-
-	if err := s.transitionTo(StateBound); err != nil {
+	if err := s.Bind(ctx, bindPDU); err != nil {
 		s.cleanup()
 		return err
 	}
