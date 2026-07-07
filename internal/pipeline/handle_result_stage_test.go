@@ -26,65 +26,39 @@ func TestHandleResultStage_NilSendResult(t *testing.T) {
 	}
 }
 
-func TestHandleResultStage_Delivered(t *testing.T) {
-	tests := []struct {
-		name string
-		sr   *SendResult
-		want domain.MessageStatus
-	}{
-		{
-			name: "success with external ID",
-			sr: &SendResult{
-				Success:    true,
-				ExternalID: "provider-msg-123",
-				Parts:      1,
-			},
-			want: domain.MessageStatusDelivered,
-		},
-		{
-			name: "success without ID, no DLR",
-			sr: &SendResult{
-				Success:    true,
-				ExternalID: "",
-				Parts:      1,
-			},
-			want: domain.MessageStatusDelivered,
-		},
+func TestHandleResultStage_AcceptanceFinal(t *testing.T) {
+	state := NewPipelineState(&domain.Message{}, "trace-1")
+	state.SendResult = &SendResult{
+		Success:    true,
+		ExternalID: "ext-123",
+		Parts:      1,
+		Acceptance: domain.AcceptanceFinal,
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			state := NewPipelineState(&domain.Message{}, "trace-1")
-			state.SendResult = tt.sr
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-			s := NewHandleResultStage()
-			result, err := s.Process(context.Background(), state)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if result.DeliveryOutcome == nil {
-				t.Fatal("DeliveryOutcome is nil")
-			}
-			if result.DeliveryOutcome.Status != tt.want {
-				t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, tt.want)
-			}
-			if !result.DeliveryOutcome.IsTerminal() {
-				t.Error("expected IsTerminal() = true for Delivered")
-			}
-			if result.DeliveryOutcome.FailureKind != FailureNone {
-				t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
-			}
-		})
+	if result.DeliveryOutcome.Status != domain.MessageStatusDelivered {
+		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusDelivered)
+	}
+	if !result.DeliveryOutcome.IsTerminal() {
+		t.Error("expected IsTerminal() = true for Delivered")
+	}
+	if result.DeliveryOutcome.FailureKind != FailureNone {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
 	}
 }
 
-func TestHandleResultStage_SentPendingDLR(t *testing.T) {
+func TestHandleResultStage_AcceptancePendingDLR(t *testing.T) {
 	state := NewPipelineState(&domain.Message{}, "trace-1")
 	state.SendResult = &SendResult{
-		Success:     true,
-		ExternalID:  "",
-		Parts:       1,
-		RequestsDLR: true,
+		Success:    true,
+		ExternalID: "",
+		Parts:      1,
+		Acceptance: domain.AcceptancePendingDLR,
 	}
 
 	s := NewHandleResultStage()
@@ -99,13 +73,37 @@ func TestHandleResultStage_SentPendingDLR(t *testing.T) {
 	if result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = false when DLR pending")
 	}
-	if result.DeliveryOutcome.Reason != "sent, awaiting delivery receipt" {
-		t.Errorf("Reason = %q, want %q", result.DeliveryOutcome.Reason, "sent, awaiting delivery receipt")
+	if result.DeliveryOutcome.Reason != "accepted, awaiting delivery receipt" {
+		t.Errorf("Reason = %q, want %q", result.DeliveryOutcome.Reason, "accepted, awaiting delivery receipt")
 	}
 }
 
-func TestHandleResultStage_ProviderError_Failed(t *testing.T) {
-	// Non-retryable provider error.
+func TestHandleResultStage_AcceptanceFinal_NoExternalID(t *testing.T) {
+	// Final acceptance without ID — uncommon but valid (e.g., provider accepts silently).
+	state := NewPipelineState(&domain.Message{}, "trace-1")
+	state.SendResult = &SendResult{
+		Success:    true,
+		ExternalID: "",
+		Parts:      1,
+		Acceptance: domain.AcceptanceFinal,
+	}
+
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.DeliveryOutcome.Status != domain.MessageStatusDelivered {
+		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusDelivered)
+	}
+	if result.DeliveryOutcome.FailureKind != FailureNone {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
+	}
+}
+
+func TestHandleResultStage_Rejected_Failed(t *testing.T) {
+	// Non-retryable rejection.
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 0,
 		MaxRetries: 3,
@@ -116,6 +114,7 @@ func TestHandleResultStage_ProviderError_Failed(t *testing.T) {
 		ErrorCode:    "400",
 		ErrorMessage: "invalid destination",
 		Retryable:    false,
+		Acceptance:   domain.AcceptanceRejected,
 	}
 
 	s := NewHandleResultStage()
@@ -130,13 +129,13 @@ func TestHandleResultStage_ProviderError_Failed(t *testing.T) {
 	if !result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = true for Failed")
 	}
-	if result.DeliveryOutcome.FailureKind != FailureRejected {
-		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureRejected)
+	if result.DeliveryOutcome.FailureKind != FailurePermanent {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailurePermanent)
 	}
 }
 
-func TestHandleResultStage_ProviderError_Retrying(t *testing.T) {
-	// Retryable provider error, still within retry limit.
+func TestHandleResultStage_Rejected_Retrying(t *testing.T) {
+	// Retryable rejection, budget available.
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 1,
 		MaxRetries: 3,
@@ -147,6 +146,7 @@ func TestHandleResultStage_ProviderError_Retrying(t *testing.T) {
 		ErrorCode:    "500",
 		ErrorMessage: "provider overloaded",
 		Retryable:    true,
+		Acceptance:   domain.AcceptanceRejected,
 	}
 
 	s := NewHandleResultStage()
@@ -161,12 +161,12 @@ func TestHandleResultStage_ProviderError_Retrying(t *testing.T) {
 	if result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = false when retrying")
 	}
-	if result.DeliveryOutcome.FailureKind != FailureProvider {
-		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureProvider)
+	if result.DeliveryOutcome.FailureKind != FailureTemporary {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureTemporary)
 	}
 }
 
-func TestHandleResultStage_ProviderError_RetryExhausted(t *testing.T) {
+func TestHandleResultStage_Rejected_RetryExhausted(t *testing.T) {
 	// Retryable error but retries exhausted.
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 3,
@@ -178,6 +178,7 @@ func TestHandleResultStage_ProviderError_RetryExhausted(t *testing.T) {
 		ErrorCode:    "500",
 		ErrorMessage: "provider overloaded",
 		Retryable:    true,
+		Acceptance:   domain.AcceptanceRejected,
 	}
 
 	s := NewHandleResultStage()
@@ -192,13 +193,31 @@ func TestHandleResultStage_ProviderError_RetryExhausted(t *testing.T) {
 	if !result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = true after retries exhausted")
 	}
-	if result.DeliveryOutcome.FailureKind != FailureProvider {
-		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureProvider)
+}
+
+func TestHandleResultStage_UnknownAcceptance(t *testing.T) {
+	state := NewPipelineState(&domain.Message{}, "trace-1")
+	state.SendResult = &SendResult{
+		Success:    true,
+		ExternalID: "ext",
+		Acceptance: "unknown_value",
+	}
+
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.DeliveryOutcome.Status != domain.MessageStatusFailed {
+		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusFailed)
+	}
+	if result.DeliveryOutcome.FailureKind != FailureInternal {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureInternal)
 	}
 }
 
 func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
-	// Ensure HandleResultStage does not modify Message, Prepared, Decision, or SendResult.
 	msg := &domain.Message{Text: "hello", RetryCount: 0, MaxRetries: 3}
 	prepared := &domain.PreparedMessage{Destination: "+1234", Encoding: "GSM7", Parts: 1}
 	decision := &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
@@ -206,6 +225,7 @@ func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
 		Success:    true,
 		ExternalID: "ext-1",
 		Parts:      1,
+		Acceptance: domain.AcceptanceFinal,
 	}
 
 	state := NewPipelineState(msg, "trace-1")
@@ -219,7 +239,6 @@ func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify none of the prior artifacts were modified.
 	if state.Message.Text != "hello" {
 		t.Error("Message was modified")
 	}

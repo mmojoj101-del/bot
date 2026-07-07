@@ -84,6 +84,7 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 		Parts:        dr.Parts,
 		ErrorCode:    dr.ProviderStatus,
 		ErrorMessage: "",
+		Acceptance:   dr.Acceptance,
 	}
 
 	return state, nil

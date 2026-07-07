@@ -144,14 +144,34 @@ type SendRequest struct {
 	Prepared *PreparedMessage
 }
 
+// AcceptanceKind tells the pipeline what the connector knows about the send outcome.
+// This is set by the connector (not guessed by HandleResultStage) because
+// only the connector understands provider-specific response semantics.
+type AcceptanceKind string
+
+const (
+	// AcceptanceFinal means the provider accepted the message and no further
+	// updates (DLR) are expected. The pipeline considers this delivered.
+	AcceptanceFinal AcceptanceKind = "final"
+
+	// AcceptancePendingDLR means the provider accepted but will send a
+	// delivery receipt later. The pipeline considers this sent (pending DLR).
+	AcceptancePendingDLR AcceptanceKind = "pending_dlr"
+
+	// AcceptanceRejected means the provider rejected the message outright.
+	// The pipeline may retry or fail depending on Retryable + retry budget.
+	AcceptanceRejected AcceptanceKind = "rejected"
+)
+
 // SendResult carries the outcome of a send attempt.
 type SendResult struct {
-	ExternalID     string `json:"external_id"`
-	Parts          int    `json:"parts"`
-	Price          int64  `json:"price"`
-	Cost           int64  `json:"cost"`
-	RawResponse    []byte `json:"raw_response,omitempty"`
-	ProviderStatus string `json:"provider_status,omitempty"`
+	ExternalID     string         `json:"external_id"`
+	Parts          int            `json:"parts"`
+	Price          int64          `json:"price"`
+	Cost           int64          `json:"cost"`
+	RawResponse    []byte         `json:"raw_response,omitempty"`
+	ProviderStatus string         `json:"provider_status,omitempty"`
+	Acceptance     AcceptanceKind `json:"acceptance,omitempty"`
 }
 
 // Sender defines the interface for sending messages through a connector.

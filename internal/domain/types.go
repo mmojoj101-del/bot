@@ -114,6 +114,18 @@ const (
 	MessagePriorityUrgent MessagePriority = "urgent"
 )
 
+// IsTerminalStatus returns true if the message status is final and no further
+// processing should occur. Adding a new terminal status only requires adding
+// it here — no DeliveryOutcome or pipeline changes needed.
+func IsTerminalStatus(s MessageStatus) bool {
+	switch s {
+	case MessageStatusDelivered, MessageStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // DLRStatus represents the delivery receipt status.
 type DLRStatus string
 

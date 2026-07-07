@@ -190,6 +190,14 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 	}
 	price := int64(parts) * 5000 // placeholder: 0.05 per part
 
+	// Determine acceptance semantics.
+	// With an external ID → final acceptance (message is at the provider).
+	// Without an ID on HTTP 202 → likely queued/provisionally accepted.
+	acceptance := domain.AcceptanceFinal
+	if externalID == "" && resp.StatusCode == 202 {
+		acceptance = domain.AcceptancePendingDLR
+	}
+
 	return &domain.SendResult{
 		ExternalID:     externalID,
 		Parts:          parts,
@@ -197,6 +205,7 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 		Cost:           price,
 		RawResponse:    respBody,
 		ProviderStatus: providerStatus,
+		Acceptance:     acceptance,
 	}, nil
 }
 

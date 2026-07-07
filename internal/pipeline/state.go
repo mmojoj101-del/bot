@@ -64,20 +64,30 @@ type SendResult struct {
 	ErrorCode    string
 	ErrorMessage string
 	Retryable    bool
-	RequestsDLR  bool
+	// Acceptance tells the pipeline how to treat the response semantically.
+	// Mapped from domain.SendResult.Acceptance so HandleResultStage doesn't
+	// need to guess DLR semantics — the connector knows best.
+	Acceptance   domain.AcceptanceKind
 	Status       domain.MessageStatus
 }
 
-// FailureKind classifies the cause of a non-success outcome.
-// It is machine-readable — PersistStage, EmitStage, and metrics use it without parsing text.
+// FailureKind classifies the outcome at the business level.
+// It is machine-readable — PersistStage, EmitStage, and metrics use it
+// without parsing text. This is NOT a taxonomy of provider error codes;
+// provider-specific details stay in SendResult.
+//
+// Business-level classification (not protocol-specific):
+//   None      → success
+//   Temporary → retry may help (provider overloaded, timeout, throttled)
+//   Permanent → retry will not help (invalid destination, rejected, auth fail)
+//   Internal  → system error (panic, DB, config, unexpected)
 type FailureKind string
 
 const (
-	FailureNone      FailureKind = ""           // success — no failure
-	FailureProvider  FailureKind = "provider"   // provider returned an error code
-	FailureTransport FailureKind = "transport"  // transport-level failure (connection, timeout)
-	FailureRejected  FailureKind = "rejected"   // message rejected (invalid destination, auth)
-	FailureInternal  FailureKind = "internal"   // internal pipeline or system error
+	FailureNone      FailureKind = ""          // success
+	FailureTemporary FailureKind = "temporary" // retryable — provider/throttle/timeout
+	FailurePermanent FailureKind = "permanent" // non-retryable — rejected/invalid/auth
+	FailureInternal  FailureKind = "internal"  // system error — bug/config/panic
 )
 
 // DeliveryOutcome is the business interpretation of a SendResult.
@@ -96,14 +106,10 @@ type DeliveryOutcome struct {
 }
 
 // IsTerminal returns true if the outcome is final and no further processing
-// should occur for this message. Derived from Status — no redundant field.
+// should occur. Delegates to domain.IsTerminalStatus — adding new terminal
+// statuses only requires changing that one function, not this method.
 func (d *DeliveryOutcome) IsTerminal() bool {
-	switch d.Status {
-	case domain.MessageStatusDelivered, domain.MessageStatusFailed:
-		return true
-	default:
-		return false
-	}
+	return domain.IsTerminalStatus(d.Status)
 }
 
 // NewPipelineState creates a new PipelineState for a message.
