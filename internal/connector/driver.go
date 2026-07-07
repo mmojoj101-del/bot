@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
@@ -99,35 +100,67 @@ type TransportResponse struct {
 	Latency time.Duration
 }
 
+// ── Optional Driver Interfaces ───────────────────────────────────────────────
+
+// StatefulDriver is an OPTIONAL interface that stateful protocol drivers
+// (SMPP, SIP) may implement on top of ProtocolDriver.
+// GenericConnector checks via type assertion and calls lifecycle methods
+// when the connector starts or is removed.
+//
+// Stateless drivers (HTTP) don't need this.
+type StatefulDriver interface {
+	ProtocolDriver
+
+	// Connect establishes the session (TCP/TLS + bind for SMPP,
+	// registration for SIP). Called before the first Send.
+	Connect(ctx context.Context) error
+
+	// Disconnect tears down the session gracefully.
+	// Called when the connector is removed or on graceful shutdown.
+	Disconnect(ctx context.Context) error
+
+	// IsConnected returns true if the session is active.
+	IsConnected() bool
+}
+
+// ConfigurableDriver is an OPTIONAL interface for drivers that need
+// notification when their config changes at runtime.
+// GenericConnector calls ApplyConfig when the connector's configuration
+// is updated (e.g., Admin changes endpoint URL via API).
+type ConfigurableDriver interface {
+	ProtocolDriver
+
+	// ApplyConfig applies a new TransportConfig at runtime.
+	// The driver should update its internal state (e.g., reconnect
+	// with new credentials) without losing queued messages.
+	AcceptConfig(cfg TransportConfig) error
+}
+
+// StatefulDriverLifecycle is an optional manager for starting/stopping
+// stateful drivers asynchronously (e.g., SMPP keep-alive loop).
+type StatefulDriverLifecycle interface {
+	// Start begins async session maintenance (enquire-link, reconnect).
+	// Returns an error channel for fatal connection errors.
+	Start(ctx context.Context) <-chan error
+
+	// Stop terminates the async session maintenance.
+	Stop(ctx context.Context) error
+}
+
 // ── Driver Registry ──────────────────────────────────────────────────────────
 
 // DriverRegistry maps protocol types to their ProtocolDriver implementations.
-// Adding a new protocol is just: registry.Register(smppDriver)
+// Thread-safe: all operations protected by RWMutex.
 type DriverRegistry interface {
-	// Register adds a driver for a protocol. Panics if protocol already registered.
 	Register(driver ProtocolDriver)
-
-	// MustRegister is like Register but panics with a descriptive message on error.
-	// Useful in init() or main() for required drivers.
 	MustRegister(driver ProtocolDriver)
-
-	// Replace replaces a driver for an existing protocol, or registers if new.
-	// Unlike Register, if the protocol is already registered, it's overwritten.
-	// Useful for testing (swap HTTP driver with mock) or plugin updates.
 	Replace(driver ProtocolDriver)
-
-	// Get returns the driver for the given protocol. Returns error if not found.
 	Get(protocol domain.ConnectorType) (ProtocolDriver, error)
-
-	// Unregister removes a driver for a protocol. No-op if not registered.
-	// Useful in test cleanup or plugin unload.
 	Unregister(protocol domain.ConnectorType)
-
-	// Protocols returns all registered protocol types.
 	Protocols() []domain.ConnectorType
 }
 
-// NewDriverRegistry creates an empty driver registry.
+// NewDriverRegistry creates an empty, thread-safe driver registry.
 func NewDriverRegistry() DriverRegistry {
 	return &driverRegistry{
 		drivers: make(map[domain.ConnectorType]ProtocolDriver),
@@ -135,30 +168,39 @@ func NewDriverRegistry() DriverRegistry {
 }
 
 type driverRegistry struct {
+	mu      sync.RWMutex
 	drivers map[domain.ConnectorType]ProtocolDriver
 }
 
 func (r *driverRegistry) Register(driver ProtocolDriver) {
 	p := driver.Protocol()
-	if _, ok := r.drivers[p]; ok {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.drivers[p]; exists {
 		panic(fmt.Sprintf("driver already registered for protocol %q — use Replace to overwrite", p))
 	}
 	r.drivers[p] = driver
 }
 
 func (r *driverRegistry) MustRegister(driver ProtocolDriver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	p := driver.Protocol()
-	if _, ok := r.drivers[p]; ok {
+	if _, exists := r.drivers[p]; exists {
 		panic(fmt.Sprintf("must register: driver already exists for protocol %q", p))
 	}
 	r.drivers[p] = driver
 }
 
 func (r *driverRegistry) Replace(driver ProtocolDriver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.drivers[driver.Protocol()] = driver
 }
 
 func (r *driverRegistry) Get(protocol domain.ConnectorType) (ProtocolDriver, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	d, ok := r.drivers[protocol]
 	if !ok {
 		return nil, fmt.Errorf("no driver registered for protocol %q", protocol)
@@ -167,10 +209,14 @@ func (r *driverRegistry) Get(protocol domain.ConnectorType) (ProtocolDriver, err
 }
 
 func (r *driverRegistry) Unregister(protocol domain.ConnectorType) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	delete(r.drivers, protocol)
 }
 
 func (r *driverRegistry) Protocols() []domain.ConnectorType {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	protocols := make([]domain.ConnectorType, 0, len(r.drivers))
 	for p := range r.drivers {
 		protocols = append(protocols, p)

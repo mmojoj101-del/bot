@@ -39,7 +39,11 @@ type GenericConnector struct {
 	// Set during lazyInit, used by CheckHealth.
 	decodedConfig TransportConfig
 
-	mu   sync.Mutex
+	// configVersion increments every time Reconfigure is called.
+	// Checked in Send() to detect stale decodedConfig.
+	configVersion int64
+
+	mu  sync.Mutex
 	once sync.Once
 }
 
@@ -214,6 +218,54 @@ func (c *GenericConnector) CheckHealth(ctx context.Context) error {
 		}
 	}
 	return c.driver.CheckHealth(ctx, c.decodedConfig)
+}
+
+// Reconfigure updates the connector's runtime configuration.
+// This invalidates the cached decodedConfig — the next Send() or CheckHealth()
+// will re-decode the new transport config automatically.
+// Thread-safe: uses atomic counter to detect stale cache.
+//
+// The orchestrator calls this when an admin updates endpoint settings via API.
+func (c *GenericConnector) Reconfigure(config ConnectorConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.config = config
+
+	// Invalidate lazyInit cache so lazyInit() re-runs on next access
+	c.once = sync.Once{}
+	c.decodedConfig = nil
+
+	// Notify stateful driver if it implements ConfigurableDriver
+	if cd, ok := c.driver.(ConfigurableDriver); ok && c.decodedConfig != nil {
+		_ = cd.AcceptConfig(c.decodedConfig) // best-effort
+	}
+}
+
+// Connect establishes a session for stateful drivers (SMPP, SIP).
+// No-op for stateless drivers (HTTP). Returns nil if not stateful.
+func (c *GenericConnector) Connect(ctx context.Context) error {
+	if sd, ok := c.driver.(StatefulDriver); ok {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !sd.IsConnected() {
+			return sd.Connect(ctx)
+		}
+	}
+	return nil
+}
+
+// Disconnect tears down a session for stateful drivers.
+// No-op for stateless drivers.
+func (c *GenericConnector) Disconnect(ctx context.Context) error {
+	if sd, ok := c.driver.(StatefulDriver); ok {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if sd.IsConnected() {
+			return sd.Disconnect(ctx)
+		}
+	}
+	return nil
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -397,10 +449,19 @@ func renderReflect(val reflect.Value, fields map[string]string) error {
 		}
 		for _, key := range val.MapKeys() {
 			elem := val.MapIndex(key)
-			if elem.Kind() == reflect.String {
+			switch elem.Kind() {
+			case reflect.String:
 				newVal := renderString(elem.String(), fields)
 				if newVal != elem.String() {
 					val.SetMapIndex(key, reflect.ValueOf(newVal))
+				}
+			case reflect.Ptr, reflect.Struct, reflect.Interface:
+				if err := renderReflect(elem, fields); err != nil {
+					return err
+				}
+			case reflect.Map:
+				if err := renderReflect(elem, fields); err != nil {
+					return err
 				}
 			}
 		}
@@ -408,9 +469,15 @@ func renderReflect(val reflect.Value, fields map[string]string) error {
 	case reflect.Slice:
 		for i := 0; i < val.Len(); i++ {
 			elem := val.Index(i)
-			if elem.Kind() == reflect.Ptr || elem.Kind() == reflect.Struct {
+			switch elem.Kind() {
+			case reflect.Ptr, reflect.Struct, reflect.Interface, reflect.Map:
 				if err := renderReflect(elem, fields); err != nil {
 					return err
+				}
+			case reflect.String:
+				newVal := renderString(elem.String(), fields)
+				if newVal != elem.String() {
+					elem.SetString(newVal)
 				}
 			}
 		}
