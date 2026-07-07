@@ -3,16 +3,20 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
 
 // HandleResultStage interprets the connector's SendResult and produces a
-// DeliveryOutcome — the single business decision artifact.
+// DeliveryOutcome — the single business interpretation artifact.
 //
 // It is pure logic: no DB access, no event publishing, no external calls.
 // Its only job is to answer: "What does this SendResult mean for the message?"
+//
+// IMPORTANT: HandleResultStage does NOT decide retry timing or policy.
+// It classifies the outcome (Status + FailureKind) and signals whether
+// retry is appropriate via Status=Retrying. A separate RetryPolicy or
+// RetryDecorator handles scheduling (backoff, jitter, cap).
 //
 // Input:  PipelineState.SendResult + PipelineState.Message (read-only)
 // Output: PipelineState.DeliveryOutcome (new artifact, appended after SendResult)
@@ -38,40 +42,41 @@ var ErrNoSendResult = fmt.Errorf("handle result stage: no send result to interpr
 // Decision matrix:
 //
 //	SendResult.Success │ ErrorCode  │ ExternalID     │ Outcome
-//	───────────────────┼────────────┼────────────────┼──────────────────────────────
-//	false              │ any        │ any            │ Failed (non-retryable)
-//	true               │ ""         │ non-empty      │ Delivered (terminal)
-//	true               │ ""         │ "" + DLR       │ Sent (pending DLR)
-//	true               │ ""         │ "" + no DLR    │ Delivered (accepted w/o ID)
-//	true               │ non-empty  │ any            │ Depends on Retryable + RetryCount
+//	───────────────────┼────────────┼────────────────┼─────────────────────────────
+//	true               │ ""         │ non-empty      │ Delivered, FailureNone
+//	true               │ ""         │ "" + DLR       │ Sent, FailureNone
+//	true               │ ""         │ "" − DLR       │ Delivered, FailureNone
+//	false              │ non-empty  │ any            │ Retrying† or Failed
+//
+//	† Retrying only when Retryable=true AND RetryCount < MaxRetries.
+//	  Otherwise Failed.
 func (s *HandleResultStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	if state.SendResult == nil {
 		return nil, ErrNoSendResult
 	}
 
 	sr := state.SendResult
-	outcome := DeliveryOutcome{}
+	var outcome DeliveryOutcome
 
-	// ── Transport-level failure (sender returned error, SendResult not set) ──
-	// This case is handled by SendStage returning an error — HandleResultStage
-	// never sees it. If we reach here, sender.Send() succeeded.
-
-	// ── Provider-level rejection (HTTP 200, but provider returned error code) ──
-	if sr.ErrorCode != "" && !sr.Success {
+	// ── Provider-level failure (transport succeeded, provider returned error) ──
+	if !sr.Success && sr.ErrorCode != "" {
 		if sr.Retryable && state.Message.RetryCount < state.Message.MaxRetries {
 			outcome = DeliveryOutcome{
-				Status:     domain.MessageStatusRetrying,
-				Retry:      true,
-				RetryAfter: backoffForAttempt(state.Message.RetryCount),
-				Reason:     fmt.Sprintf("retryable provider error: %s", sr.ErrorCode),
-				Terminal:   false,
+				Status:      domain.MessageStatusRetrying,
+				FailureKind: FailureProvider,
+				Reason:      fmt.Sprintf("retryable provider error: %s", sr.ErrorCode),
+			}
+		} else if !sr.Retryable {
+			outcome = DeliveryOutcome{
+				Status:      domain.MessageStatusFailed,
+				FailureKind: FailureRejected,
+				Reason:      fmt.Sprintf("non-retryable provider error: %s", sr.ErrorCode),
 			}
 		} else {
 			outcome = DeliveryOutcome{
-				Status:   domain.MessageStatusFailed,
-				Retry:    false,
-				Reason:   fmt.Sprintf("provider error: %s", sr.ErrorCode),
-				Terminal: true,
+				Status:      domain.MessageStatusFailed,
+				FailureKind: FailureProvider,
+				Reason:      fmt.Sprintf("retries exhausted: %s", sr.ErrorCode),
 			}
 		}
 		state.DeliveryOutcome = &outcome
@@ -79,44 +84,25 @@ func (s *HandleResultStage) Process(ctx context.Context, state *PipelineState) (
 	}
 
 	// ── Transport + provider success ──
-	// sr.Success == true (set by SendStage when sender.Send() returned nil)
-	if sr.ExternalID != "" {
-		// Provider returned a message ID — message was accepted.
+	switch {
+	case sr.ExternalID != "":
 		outcome = DeliveryOutcome{
-			Status:   domain.MessageStatusDelivered,
-			Retry:    false,
-			Reason:   fmt.Sprintf("delivered to provider, id=%s", sr.ExternalID),
-			Terminal: true,
+			Status: domain.MessageStatusDelivered,
+			Reason: fmt.Sprintf("delivered, id=%s", sr.ExternalID),
 		}
-	} else if sr.RequestsDLR {
-		// Provider accepted without immediate ID, DLR expected.
+	case sr.RequestsDLR:
 		outcome = DeliveryOutcome{
-			Status:   domain.MessageStatusSent,
-			Retry:    false,
-			Reason:   "sent, awaiting delivery receipt",
-			Terminal: false, // DLR may update status
+			Status:      domain.MessageStatusSent,
+			FailureKind: FailureNone,
+			Reason:      "sent, awaiting delivery receipt",
 		}
-	} else {
-		// Provider accepted without ID and no DLR — consider delivered.
+	default:
 		outcome = DeliveryOutcome{
-			Status:   domain.MessageStatusDelivered,
-			Retry:    false,
-			Reason:   "accepted by provider",
-			Terminal: true,
+			Status: domain.MessageStatusDelivered,
+			Reason: "accepted by provider",
 		}
 	}
 
 	state.DeliveryOutcome = &outcome
 	return state, nil
-}
-
-// backoffForAttempt returns the delay before the next retry.
-// Uses exponential backoff: 2^attempt seconds, capped at 300s (5 min).
-func backoffForAttempt(attempt int) time.Duration {
-	base := 1 << uint(attempt) // 1, 2, 4, 8, 16, 32, 64, 128, 256
-	seconds := base
-	if seconds > 300 {
-		seconds = 300
-	}
-	return time.Duration(seconds) * time.Second
 }

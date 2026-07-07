@@ -1,8 +1,6 @@
 package pipeline
 
 import (
-	"time"
-
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
 
@@ -32,9 +30,9 @@ type PipelineState struct {
 	// Immutable after SendStage — subsequent stages read but never modify it.
 	SendResult *SendResult
 
-	// DeliveryOutcome is the business decision after interpreting SendResult
-	// (set by HandleResultStage). Contains the final or intermediary status
-	// and retry policy — PersistStage and EmitStage read it, never modify it.
+	// DeliveryOutcome is the business interpretation of SendResult
+	// (set by HandleResultStage). PersistStage and EmitStage read it
+	// but never modify it. Retry scheduling is external (RetryPolicy).
 	DeliveryOutcome *DeliveryOutcome
 
 	// TraceID is the cross-lifecycle trace identifier.
@@ -70,26 +68,42 @@ type SendResult struct {
 	Status       domain.MessageStatus
 }
 
-// DeliveryOutcome is the business decision produced by HandleResultStage.
-// It interprets SendResult + Message context and decides the final or
-// intermediary disposition of the message.
-// PersistStage writes it, EmitStage publishes events from it — neither modifies it.
+// FailureKind classifies the cause of a non-success outcome.
+// It is machine-readable — PersistStage, EmitStage, and metrics use it without parsing text.
+type FailureKind string
+
+const (
+	FailureNone      FailureKind = ""           // success — no failure
+	FailureProvider  FailureKind = "provider"   // provider returned an error code
+	FailureTransport FailureKind = "transport"  // transport-level failure (connection, timeout)
+	FailureRejected  FailureKind = "rejected"   // message rejected (invalid destination, auth)
+	FailureInternal  FailureKind = "internal"   // internal pipeline or system error
+)
+
+// DeliveryOutcome is the business interpretation of a SendResult.
+// It is produced by HandleResultStage — pure logic, no DB, no event bus.
+// PersistStage and EmitStage read it; neither modifies it.
+// Retry scheduling (backoff, jitter) is handled by a separate RetryPolicy/RetryDecorator.
 type DeliveryOutcome struct {
 	// Status is the canonical message status after handling.
 	Status domain.MessageStatus
 
-	// Retry indicates whether the message should be retried.
-	Retry bool
+	// FailureKind classifies the cause. Empty = success.
+	FailureKind FailureKind
 
-	// RetryAfter is the delay before the next retry attempt (zero = immediate).
-	RetryAfter time.Duration
-
-	// Reason is a human-readable explanation of the outcome.
+	// Reason is a human-readable explanation (e.g., "provider returned 500").
 	Reason string
+}
 
-	// Terminal is true if no further processing should happen for this message.
-	// Terminal messages are persisted and emitted; non-terminal may trigger retry.
-	Terminal bool
+// IsTerminal returns true if the outcome is final and no further processing
+// should occur for this message. Derived from Status — no redundant field.
+func (d *DeliveryOutcome) IsTerminal() bool {
+	switch d.Status {
+	case domain.MessageStatusDelivered, domain.MessageStatusFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // NewPipelineState creates a new PipelineState for a message.

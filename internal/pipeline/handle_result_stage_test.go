@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
@@ -29,10 +28,9 @@ func TestHandleResultStage_NilSendResult(t *testing.T) {
 
 func TestHandleResultStage_Delivered(t *testing.T) {
 	tests := []struct {
-		name     string
-		sr       *SendResult
-		want     domain.MessageStatus
-		wantTerm bool
+		name string
+		sr   *SendResult
+		want domain.MessageStatus
 	}{
 		{
 			name: "success with external ID",
@@ -41,8 +39,7 @@ func TestHandleResultStage_Delivered(t *testing.T) {
 				ExternalID: "provider-msg-123",
 				Parts:      1,
 			},
-			want:     domain.MessageStatusDelivered,
-			wantTerm: true,
+			want: domain.MessageStatusDelivered,
 		},
 		{
 			name: "success without ID, no DLR",
@@ -51,8 +48,7 @@ func TestHandleResultStage_Delivered(t *testing.T) {
 				ExternalID: "",
 				Parts:      1,
 			},
-			want:     domain.MessageStatusDelivered,
-			wantTerm: true,
+			want: domain.MessageStatusDelivered,
 		},
 	}
 
@@ -72,11 +68,11 @@ func TestHandleResultStage_Delivered(t *testing.T) {
 			if result.DeliveryOutcome.Status != tt.want {
 				t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, tt.want)
 			}
-			if result.DeliveryOutcome.Terminal != tt.wantTerm {
-				t.Errorf("Terminal = %v, want %v", result.DeliveryOutcome.Terminal, tt.wantTerm)
+			if !result.DeliveryOutcome.IsTerminal() {
+				t.Error("expected IsTerminal() = true for Delivered")
 			}
-			if result.DeliveryOutcome.Retry {
-				t.Error("expected Retry = false")
+			if result.DeliveryOutcome.FailureKind != FailureNone {
+				t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
 			}
 		})
 	}
@@ -100,8 +96,8 @@ func TestHandleResultStage_SentPendingDLR(t *testing.T) {
 	if result.DeliveryOutcome.Status != domain.MessageStatusSent {
 		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusSent)
 	}
-	if result.DeliveryOutcome.Terminal {
-		t.Error("expected Terminal = false when DLR pending")
+	if result.DeliveryOutcome.IsTerminal() {
+		t.Error("expected IsTerminal() = false when DLR pending")
 	}
 	if result.DeliveryOutcome.Reason != "sent, awaiting delivery receipt" {
 		t.Errorf("Reason = %q, want %q", result.DeliveryOutcome.Reason, "sent, awaiting delivery receipt")
@@ -131,15 +127,15 @@ func TestHandleResultStage_ProviderError_Failed(t *testing.T) {
 	if result.DeliveryOutcome.Status != domain.MessageStatusFailed {
 		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusFailed)
 	}
-	if !result.DeliveryOutcome.Terminal {
-		t.Error("expected Terminal = true for failed message")
+	if !result.DeliveryOutcome.IsTerminal() {
+		t.Error("expected IsTerminal() = true for Failed")
 	}
-	if result.DeliveryOutcome.Retry {
-		t.Error("expected Retry = false for non-retryable error")
+	if result.DeliveryOutcome.FailureKind != FailureRejected {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureRejected)
 	}
 }
 
-func TestHandleResultStage_ProviderError_Retry(t *testing.T) {
+func TestHandleResultStage_ProviderError_Retrying(t *testing.T) {
 	// Retryable provider error, still within retry limit.
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 1,
@@ -162,14 +158,11 @@ func TestHandleResultStage_ProviderError_Retry(t *testing.T) {
 	if result.DeliveryOutcome.Status != domain.MessageStatusRetrying {
 		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusRetrying)
 	}
-	if !result.DeliveryOutcome.Retry {
-		t.Error("expected Retry = true for retryable error")
+	if result.DeliveryOutcome.IsTerminal() {
+		t.Error("expected IsTerminal() = false when retrying")
 	}
-	if result.DeliveryOutcome.Terminal {
-		t.Error("expected Terminal = false when retrying")
-	}
-	if result.DeliveryOutcome.RetryAfter <= 0 {
-		t.Error("expected RetryAfter > 0")
+	if result.DeliveryOutcome.FailureKind != FailureProvider {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureProvider)
 	}
 }
 
@@ -196,11 +189,11 @@ func TestHandleResultStage_ProviderError_RetryExhausted(t *testing.T) {
 	if result.DeliveryOutcome.Status != domain.MessageStatusFailed {
 		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusFailed)
 	}
-	if !result.DeliveryOutcome.Terminal {
-		t.Error("expected Terminal = true after retries exhausted")
+	if !result.DeliveryOutcome.IsTerminal() {
+		t.Error("expected IsTerminal() = true after retries exhausted")
 	}
-	if result.DeliveryOutcome.Retry {
-		t.Error("expected Retry = false after retries exhausted")
+	if result.DeliveryOutcome.FailureKind != FailureProvider {
+		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureProvider)
 	}
 }
 
@@ -239,35 +232,30 @@ func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
 	if state.SendResult != sr {
 		t.Error("SendResult was replaced")
 	}
-	// DeliveryOutcome should be the only new artifact.
 	if state.DeliveryOutcome == nil {
 		t.Error("DeliveryOutcome was not set")
 	}
 }
 
-func TestBackoffForAttempt(t *testing.T) {
+func TestDeliveryOutcome_IsTerminal(t *testing.T) {
 	tests := []struct {
-		attempt int
-		want    time.Duration
+		status domain.MessageStatus
+		term   bool
 	}{
-		{0, 1 * time.Second},
-		{1, 2 * time.Second},
-		{2, 4 * time.Second},
-		{3, 8 * time.Second},
-		{4, 16 * time.Second},
-		{5, 32 * time.Second},
-		{6, 64 * time.Second},
-		{7, 128 * time.Second},
-		{8, 256 * time.Second},
-		{9, 300 * time.Second}, // capped at 300s
-		{10, 300 * time.Second},
+		{domain.MessageStatusDelivered, true},
+		{domain.MessageStatusFailed, true},
+		{domain.MessageStatusRetrying, false},
+		{domain.MessageStatusSent, false},
+		{domain.MessageStatusQueued, false},
+		{domain.MessageStatusSending, false},
+		{domain.MessageStatusAccepted, false},
 	}
 
 	for _, tt := range tests {
-		t.Run("", func(t *testing.T) {
-			got := backoffForAttempt(tt.attempt)
-			if got != tt.want {
-				t.Errorf("backoffForAttempt(%d) = %v, want %v", tt.attempt, got, tt.want)
+		t.Run(string(tt.status), func(t *testing.T) {
+			d := DeliveryOutcome{Status: tt.status}
+			if got := d.IsTerminal(); got != tt.term {
+				t.Errorf("IsTerminal() for Status=%q = %v, want %v", tt.status, got, tt.term)
 			}
 		})
 	}
