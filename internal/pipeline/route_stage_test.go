@@ -90,7 +90,7 @@ func TestPipeline_ValidatePrepareRoute(t *testing.T) {
 	}
 
 	// Prepare stage: PreparedMessage populated
-	if state.Prepared.Destination == "" {
+	if state.Prepared == nil {
 		t.Fatal("expected PreparedMessage from PrepareStage")
 	}
 	if state.Prepared.Encoding != "GSM7" {
@@ -128,7 +128,7 @@ func TestPipeline_ValidatePrepareRoute_RouteFails(t *testing.T) {
 	}
 
 	// PreparedMessage should still be set (PrepareStage ran before RouteStage)
-	if state.Prepared.Destination == "" {
+	if state.Prepared == nil {
 		t.Fatal("expected PreparedMessage even when route fails")
 	}
 

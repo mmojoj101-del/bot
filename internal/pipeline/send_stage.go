@@ -41,8 +41,8 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 	if state.Decision == nil {
 		return nil, ErrNoRoute
 	}
-	// Prepared is a value type; zero value means PrepareStage hasn't run.
-	if state.Prepared.Destination == "" && state.Prepared.Encoding == "" {
+	// Prepared is nil until PrepareStage runs — no heuristic invariants.
+	if state.Prepared == nil {
 		return nil, ErrNoPrepared
 	}
 
@@ -52,13 +52,11 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 		return nil, fmt.Errorf("%w: %q: %w", ErrConnectorUnavailable, state.Decision.ConnectorID, err)
 	}
 
-	// Copy Prepared to a local variable so the sender gets its own copy.
-	// This prevents the sender from mutating PipelineState.Prepared.
-	prepared := state.Prepared // value copy
+	// Dereference to copy: sender gets its own PreparedMessage, preventing mutation.
+	// PipelineState.Prepared remains owned by the pipeline and is immutable.
+	prepared := *state.Prepared // value copy (defensive)
 
-	// Build domain-level SendRequest:
-	//   - Message: canonical domain message (unchanged — pipeline never mutates it)
-	//   - Prepared: local copy (sender cannot see or modify PipelineState's copy)
+	// Build domain-level SendRequest with the local copy.
 	sendReq := domain.SendRequest{
 		Message:   state.Message,
 		Prepared:  &prepared,

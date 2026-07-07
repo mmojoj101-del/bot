@@ -6,21 +6,22 @@ import (
 
 // PipelineState carries message context through all pipeline stages.
 // Each stage reads from relevant fields and populates its output field.
-// Fields are deliberately typed — no map[string]any, no Error duplication.
-// Prepared is a value type (copy on assignment) to prevent mutation.
+// Nil pointers indicate "not yet set" — no heuristic invariants.
+// Immutability enforcement: SendStage copies Prepared before passing to sender.
 type PipelineState struct {
 	// Message is the canonical domain message being processed. Immutable in the pipeline.
 	Message *domain.Message
 
-	// Prepared is the output of PrepareStage (normalized destination, encoding, parts).
-	// Value type — any stage that reads it gets a copy.
-	Prepared domain.PreparedMessage
+	// Prepared is the output of PrepareStage (nil = not yet prepared).
+	// SendStage copies this before passing to the sender (safe copy pattern).
+	Prepared *domain.PreparedMessage
 
-	// Decision is the routing decision set by RouteStage (pointer = nil when undecided).
-	// After RouteStage: treat as immutable — do not modify its fields.
+	// Decision is the routing decision set by RouteStage (nil = undecided).
+	// No stage modifies it after RouteStage sets it.
 	Decision *RoutingDecision
 
-	// SendResult is the result from the connector (set by SendStage).
+	// SendResult is the result from the connector (set by SendStage, nil = not sent).
+	// Immutable after SendStage — subsequent stages read but never modify it.
 	SendResult *SendResult
 
 	// TraceID is the cross-lifecycle trace identifier.

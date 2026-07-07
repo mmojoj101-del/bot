@@ -12,7 +12,7 @@ import (
 // This simulates the output of Validate→Prepare→Route stages.
 func routedState() *PipelineState {
 	state := validState()
-	state.Prepared = PreparedMessage{
+	state.Prepared = &PreparedMessage{
 		Destination: "+1234567890",
 		Encoding:    "GSM7",
 		Parts:       1,
@@ -138,7 +138,7 @@ func TestSendStage_NoPreparedMessage(t *testing.T) {
 	}
 	stage := NewSendStage(reg)
 	state := routedState()
-	state.Prepared = PreparedMessage{}
+	state.Prepared = nil
 
 	_, err := stage.Process(context.Background(), state)
 	if err == nil {
@@ -182,7 +182,7 @@ func TestPipeline_FullSequence(t *testing.T) {
 	}
 
 	// Verify all stages populated their results
-	if state.Prepared.Destination == "" {
+	if state.Prepared == nil {
 		t.Fatal("expected Prepared to be populated")
 	}
 	if state.Decision == nil {
@@ -232,7 +232,7 @@ func TestPipeline_FullSequence_SendFails(t *testing.T) {
 	}
 
 	// Verify earlier stages populated their results
-	if state.Prepared.Destination == "" {
+	if state.Prepared == nil {
 		t.Fatal("expected Prepared even on failure")
 	}
 	if state.Decision == nil {

@@ -18,7 +18,7 @@ func TestPrepareStage_ValidMessageGSM7(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if result.Prepared.Destination == "" {
+	if result.Prepared == nil {
 		t.Fatal("expected Prepared to be set")
 	}
 	if result.Prepared.Encoding != "GSM7" {
@@ -176,7 +176,7 @@ func TestPrepareStage_PhoneNormalization(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error for %q: %v", tt.input, err)
 			}
-			if result.Prepared.Destination == "" {
+			if result.Prepared == nil {
 				t.Fatal("expected Prepared")
 			}
 			if result.Prepared.Destination != tt.expected {
@@ -218,7 +218,7 @@ func TestPipeline_ValidateThenPrepare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected pipeline to succeed, got: %v", err)
 	}
-	if state.Prepared.Destination == "" {
+	if state.Prepared == nil {
 		t.Fatal("expected Prepared after Prepare stage")
 	}
 	if state.Prepared.Encoding != "GSM7" {
