@@ -68,14 +68,19 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 		return nil, fmt.Errorf("send stage: connector %q returned error: %w", state.Decision.ConnectorID, err)
 	}
 
+	// Defensive copy: the sender relinquishes ownership of domainResult.
+	// We copy before extracting fields so any future sender mutation
+	// after returning (async cleanup, buffer reuse) has no effect.
+	dr := *domainResult // value copy
+
 	// Map domain.SendResult to pipeline.SendResult.
-	// Success = the provider accepted the message (no transport/protocol error).
-	// Domain-level details (external_id, provider_status) are in the result.
+	// PipelineState.SendResult is immutable after this point — subsequent
+	// stages read it but never modify it (same ownership boundary as Prepared).
 	state.SendResult = &SendResult{
 		Success:      true,
-		ExternalID:   domainResult.ExternalID,
-		Parts:        domainResult.Parts,
-		ErrorCode:    domainResult.ProviderStatus,
+		ExternalID:   dr.ExternalID,
+		Parts:        dr.Parts,
+		ErrorCode:    dr.ProviderStatus,
 		ErrorMessage: "",
 	}
 
