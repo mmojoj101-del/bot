@@ -3,6 +3,7 @@ package smpp
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -228,5 +229,70 @@ func TestReader_DecodeError_Continues(t *testing.T) {
 
 	if n := errorLog.Load(); n != 1 {
 		t.Errorf("expected 1 decode error log, got %d", n)
+	}
+}
+
+// collectorPendingHandler implements PendingResponseHandler with a hook.
+type collectorPendingHandler struct {
+	hook func(resp PDU)
+}
+
+func (c *collectorPendingHandler) HandleResponse(resp PDU) {
+	if c.hook != nil {
+		c.hook(resp)
+	}
+}
+
+func TestReader_MultiplePDUs_InOrder(t *testing.T) {
+	codec := NewCodec(Version3_4)
+	transport := newReaderFakeTransport()
+
+	var mu sync.Mutex
+	var seqs []uint32
+	var callCount int32
+
+	// Custom handler that collects seq numbers in order
+	pending := &collectorPendingHandler{
+		hook: func(resp PDU) {
+			mu.Lock()
+			seqs = append(seqs, resp.Header().SequenceNumber)
+			callCount++
+			mu.Unlock()
+		},
+	}
+
+	dispatcher := NewDispatcher(pending, nil, nil, nil, nil, nil)
+	errCh := make(chan error, 1)
+
+	reader := NewReader(transport, codec, dispatcher, errCh)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Queue 3 PDUs in sequence
+	for _, seq := range []uint32{10, 20, 30} {
+		pdu := &SubmitSMResp{
+			Hdr:       Header{CommandID: CommandIDSubmitSMResp, SequenceNumber: seq, CommandStatus: StatusOK},
+			MessageID: "",
+		}
+		transport.ch <- encodeTestPDU(t, codec, pdu)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		reader.Start(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if callCount != 3 {
+		t.Errorf("expected 3 handler calls, got %d", callCount)
+	}
+	if len(seqs) != 3 || seqs[0] != 10 || seqs[1] != 20 || seqs[2] != 30 {
+		t.Errorf("expected seqs [10,20,30], got %v", seqs)
 	}
 }

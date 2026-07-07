@@ -295,3 +295,30 @@ func TestDispatcher_CustomRegistration(t *testing.T) {
 		t.Errorf("expected 1 custom handler call, got %d", n)
 	}
 }
+
+func TestDispatcher_RegisterAfterFreeze_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic from Register after freeze, got none")
+		}
+	}()
+
+	d := NewDispatcher(nil, nil, nil, nil, nil, nil)
+	d.Freeze()
+	d.Register(CommandID(0xDEAD), func(pdu PDU) *DeliverSMResp { return nil })
+}
+
+func TestDispatcher_AutoFreezeOnDispatch(t *testing.T) {
+	d := NewDispatcher(nil, nil, nil, nil, nil, nil)
+
+	// Dispatch auto-freezes
+	d.Dispatch(&SubmitSMResp{Hdr: Header{CommandID: CommandIDSubmitSMResp}})
+
+	// Register should panic after auto-freeze
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic from Register after auto-freeze, got none")
+		}
+	}()
+	d.Register(CommandID(0xCAFE), func(pdu PDU) *DeliverSMResp { return nil })
+}
