@@ -17,9 +17,14 @@ type DecoderFunc func(hdr *Header, body []byte) (PDU, error)
 //
 // Decoder registry is per-instance (not global), allowing registration of
 // vendor-specific or custom PDUs without modifying the codec.
+//
+// Concurrency: RegisterDecoder MUST be called before the first Decode/Encode
+// call (i.e., during initialization), NOT concurrently with ongoing operations.
+// Call Freeze() after all registrations to make the registry immutable.
 type Codec struct {
-	Version   Version
-	decoders  map[CommandID]DecoderFunc
+	Version  Version
+	decoders map[CommandID]DecoderFunc
+	frozen   bool
 }
 
 // NewCodec creates a Codec for the given SMPP version,
@@ -45,16 +50,26 @@ func NewCodec(version Version) *Codec {
 }
 
 // RegisterDecoder registers a decoder function for the given command ID.
-// If a decoder already exists, it is overwritten. This enables:
-//   - Vendor-specific PDU types
-//   - SMPP 5.0 extended PDUs
-//   - Plugin-based decoders
+// If a decoder already exists, it is overwritten.
+//
+// MUST be called during initialization, before the first Decode/Encode.
+// Panics if the codec is frozen. Thread-safe only when called from one goroutine.
 func (c *Codec) RegisterDecoder(cmd CommandID, fn DecoderFunc) {
+	if c.frozen {
+		panic("smpp: codec is frozen — cannot register decoder after first use")
+	}
 	c.decoders[cmd] = fn
+}
+
+// Freeze makes the decoder registry immutable.
+// Call after all decoders are registered, before concurrent usage.
+func (c *Codec) Freeze() {
+	c.frozen = true
 }
 
 // Decode parses a complete SMPP PDU from binary data.
 func (c *Codec) Decode(data []byte) (PDU, error) {
+	c.frozen = true // freeze on first use
 	if len(data) < 16 {
 		return nil, fmt.Errorf("%w: got %d bytes, need at least 16", ErrShortHeader, len(data))
 	}
