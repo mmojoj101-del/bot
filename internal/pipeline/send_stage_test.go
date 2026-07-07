@@ -9,7 +9,6 @@ import (
 )
 
 // routedState creates a PipelineState with Decision and SendRequest populated.
-// This simulates the output of Validate→Prepare→Route stages.
 func routedState() *PipelineState {
 	state := validState()
 	state.Prepared = &PreparedMessage{
@@ -26,42 +25,52 @@ func routedState() *PipelineState {
 	return state
 }
 
-// mockSender implements domain.Sender for testing.
-type mockSender struct {
-	result *domain.SendResult
-	err    error
+// testConnector implements Connector (alias for connector.Connector) for testing.
+type testConnector struct {
+	id       string
+	protocol domain.ConnectorType
+	result   *domain.SendResult
+	err      error
 }
 
-func (m *mockSender) Type() domain.ConnectorType {
-	return domain.ConnectorTypeHTTPClient
+func (c *testConnector) ID() string                              { return c.id }
+func (c *testConnector) Protocol() domain.ConnectorType          { return c.protocol }
+func (c *testConnector) Send(_ context.Context, _ *domain.SendRequest) (*domain.SendResult, error) {
+	return c.result, c.err
 }
 
-func (m *mockSender) Send(_ context.Context, _ domain.SendRequest) (*domain.SendResult, error) {
-	return m.result, m.err
+// testRegistry implements ConnectorRegistry for testing.
+type testRegistry struct {
+	connectors map[string]Connector
+	getErr     error
 }
 
-// mockRegistry implements ConnectorRegistry for testing.
-type mockRegistry struct {
-	senders map[string]domain.Sender
-	err     error
-}
-
-func (m *mockRegistry) Resolve(_ context.Context, id string) (domain.Sender, error) {
-	if m.err != nil {
-		return nil, m.err
+func (r *testRegistry) Get(id string) (Connector, error) {
+	if r.getErr != nil {
+		return nil, r.getErr
 	}
-	s, ok := m.senders[id]
+	c, ok := r.connectors[id]
 	if !ok {
 		return nil, errors.New("connector not found")
 	}
-	return s, nil
+	return c, nil
+}
+
+func (r *testRegistry) List() []Connector {
+	result := make([]Connector, 0, len(r.connectors))
+	for _, c := range r.connectors {
+		result = append(result, c)
+	}
+	return result
 }
 
 func TestSendStage_Success(t *testing.T) {
-	reg := &mockRegistry{
-		senders: map[string]domain.Sender{
-			"connector-http-1": &mockSender{
-				result: &domain.SendResult{ExternalID: "ext-123", Parts: 1},
+	reg := &testRegistry{
+		connectors: map[string]Connector{
+			"connector-http-1": &testConnector{
+				id:       "connector-http-1",
+				protocol: domain.ConnectorTypeHTTPClient,
+				result:   &domain.SendResult{ExternalID: "ext-123", Parts: 1},
 			},
 		},
 	}
@@ -87,9 +96,10 @@ func TestSendStage_Success(t *testing.T) {
 }
 
 func TestSendStage_ConnectorError(t *testing.T) {
-	reg := &mockRegistry{
-		senders: map[string]domain.Sender{
-			"connector-http-1": &mockSender{
+	reg := &testRegistry{
+		connectors: map[string]Connector{
+			"connector-http-1": &testConnector{
+				id:  "connector-http-1",
 				err: errors.New("provider timeout"),
 			},
 		},
@@ -107,8 +117,8 @@ func TestSendStage_ConnectorError(t *testing.T) {
 }
 
 func TestSendStage_ConnectorNotFound(t *testing.T) {
-	reg := &mockRegistry{
-		senders: map[string]domain.Sender{}, // empty
+	reg := &testRegistry{
+		connectors: map[string]Connector{},
 	}
 	stage := NewSendStage(reg)
 	state := routedState()
@@ -120,7 +130,7 @@ func TestSendStage_ConnectorNotFound(t *testing.T) {
 }
 
 func TestSendStage_NoDecision(t *testing.T) {
-	reg := &mockRegistry{}
+	reg := &testRegistry{}
 	stage := NewSendStage(reg)
 	state := validState() // no Decision set
 
@@ -131,9 +141,12 @@ func TestSendStage_NoDecision(t *testing.T) {
 }
 
 func TestSendStage_NoPreparedMessage(t *testing.T) {
-	reg := &mockRegistry{
-		senders: map[string]domain.Sender{
-			"connector-http-1": &mockSender{result: &domain.SendResult{ExternalID: "ext"}},
+	reg := &testRegistry{
+		connectors: map[string]Connector{
+			"connector-http-1": &testConnector{
+				id:     "connector-http-1",
+				result: &domain.SendResult{ExternalID: "ext"},
+			},
 		},
 	}
 	stage := NewSendStage(reg)
@@ -147,7 +160,7 @@ func TestSendStage_NoPreparedMessage(t *testing.T) {
 }
 
 func TestSendStage_Name(t *testing.T) {
-	stage := NewSendStage(&mockRegistry{})
+	stage := NewSendStage(&testRegistry{})
 	if stage.Name() != "send" {
 		t.Fatalf("expected 'send', got %q", stage.Name())
 	}
@@ -166,9 +179,10 @@ func TestPipeline_FullSequence(t *testing.T) {
 				Priority:     10,
 			},
 		}),
-		NewSendStage(&mockRegistry{
-			senders: map[string]domain.Sender{
-				"connector-http-1": &mockSender{
+		NewSendStage(&testRegistry{
+			connectors: map[string]Connector{
+				"connector-http-1": &testConnector{
+					id:     "connector-http-1",
 					result: &domain.SendResult{ExternalID: "ext-456", Parts: 1},
 				},
 			},
@@ -181,7 +195,6 @@ func TestPipeline_FullSequence(t *testing.T) {
 		t.Fatalf("expected pipeline to succeed, got: %v", err)
 	}
 
-	// Verify all stages populated their results
 	if state.Prepared == nil {
 		t.Fatal("expected Prepared to be populated")
 	}
@@ -198,7 +211,6 @@ func TestPipeline_FullSequence(t *testing.T) {
 		t.Fatalf("expected ext-456, got %q", state.SendResult.ExternalID)
 	}
 
-	// Verify domain.Message was NOT mutated
 	if state.Message.Destination != "+1234567890" {
 		t.Fatalf("msg.Destination should remain original, got %q", state.Message.Destination)
 	}
@@ -216,9 +228,10 @@ func TestPipeline_FullSequence_SendFails(t *testing.T) {
 				Priority:     10,
 			},
 		}),
-		NewSendStage(&mockRegistry{
-			senders: map[string]domain.Sender{
-				"connector-http-1": &mockSender{
+		NewSendStage(&testRegistry{
+			connectors: map[string]Connector{
+				"connector-http-1": &testConnector{
+					id:  "connector-http-1",
 					err: errors.New("provider returned 500"),
 				},
 			},
@@ -231,7 +244,6 @@ func TestPipeline_FullSequence_SendFails(t *testing.T) {
 		t.Fatal("expected pipeline to fail when send fails")
 	}
 
-	// Verify earlier stages populated their results
 	if state.Prepared == nil {
 		t.Fatal("expected Prepared even on failure")
 	}

@@ -12,10 +12,12 @@ import (
 // Those concerns belong to separate stages or subscribers.
 //
 // Lifecycle:
-//  1. Resolve the sender by Decision.ConnectorID via ConnectorRegistry
+//  1. Resolve the connector by Decision.ConnectorID via ConnectorRegistry
 //  2. Build domain.SendRequest from PreparedMessage + PipelineState
-//  3. Call sender.Send(ctx, domain.SendRequest)
+//  3. Call connector.Send(ctx, domain.SendRequest)
 //  4. Store the result in PipelineState.SendResult
+//
+// SendStage is protocol-agnostic: no if/switch on connector type.
 type SendStage struct {
 	registry ConnectorRegistry
 }
@@ -31,9 +33,9 @@ func (s *SendStage) Name() string {
 }
 
 var (
-	ErrNoRoute         = fmt.Errorf("send stage: no routing decision")
-	ErrNoPrepared      = fmt.Errorf("send stage: no prepared message")
-	ErrConnectorUnavailable = fmt.Errorf("send stage: connector not available")
+	ErrNoRoute               = fmt.Errorf("send stage: no routing decision")
+	ErrNoPrepared            = fmt.Errorf("send stage: no prepared message")
+	ErrConnectorUnavailable  = fmt.Errorf("send stage: connector not available")
 )
 
 // Process sends the prepared message through the routed connector.
@@ -41,43 +43,34 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 	if state.Decision == nil {
 		return nil, ErrNoRoute
 	}
-	// Prepared is nil until PrepareStage runs — no heuristic invariants.
 	if state.Prepared == nil {
 		return nil, ErrNoPrepared
 	}
 
-	// Resolve sender from registry (domain.Sender, not a pipeline interface)
-	sender, err := s.registry.Resolve(ctx, state.Decision.ConnectorID)
+	// Resolve connector from registry.
+	conn, err := s.registry.Get(state.Decision.ConnectorID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %q: %w", ErrConnectorUnavailable, state.Decision.ConnectorID, err)
 	}
 
-	// Dereference to copy: sender gets its own PreparedMessage, preventing mutation.
-	// PipelineState.Prepared remains owned by the pipeline and is immutable.
-	prepared := *state.Prepared // value copy (defensive)
+	// Defensive copy: sender gets its own PreparedMessage copy.
+	prepared := *state.Prepared
 
-	// Build domain-level SendRequest with the local copy.
-	sendReq := domain.SendRequest{
-		Message:   state.Message,
-		Prepared:  &prepared,
+	sendReq := &domain.SendRequest{
+		Message:  state.Message,
+		Prepared: &prepared,
 	}
 
-	// Call sender.Send with value-type SendRequest (connector cannot mutate it)
-	domainResult, err := sender.Send(ctx, sendReq)
+	// Call the connector — no protocol-specific branches here.
+	domainResult, err := conn.Send(ctx, sendReq)
 	if err != nil {
 		return nil, fmt.Errorf("send stage: connector %q returned error: %w", state.Decision.ConnectorID, err)
 	}
 
-	// Defensive copy: sender relinquishes ownership of domainResult.
-	// A shallow struct copy suffices because no pipeline stage reads
-	// RawResponse — it is transport-level metadata, not domain data.
-	// Only scalar fields (ExternalID, Parts, ProviderStatus) are mapped
-	// to pipeline.SendResult. RawResponse stays with the sender's copy.
+	// Defensive copy: shallow copy of scalar fields only.
 	dr := *domainResult
 
-	// Map domain.SendResult to pipeline.SendResult.
-	// PipelineState.SendResult is immutable after this point — subsequent
-	// stages read it but never modify it (same ownership boundary as Prepared).
+	// Map domain.SendResult → pipeline.SendResult.
 	state.SendResult = &SendResult{
 		Success:      true,
 		ExternalID:   dr.ExternalID,
