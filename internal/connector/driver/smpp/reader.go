@@ -20,11 +20,21 @@ import (
 //   - PendingStore
 //   - Retry or reconnect logic
 //
+// Error handling:
+//   - Malformed PDU (Decode error): the PDU was fully consumed from the
+//     transport (ReadPDU returns complete frames). The stream is NOT
+//     desynchronized because the 4-byte length prefix determined exactly
+//     how many bytes to read. So continuing is safe — log and move on.
+//   - Transport error (EOF, reset, timeout): fatal — the stream is broken.
+//     The Reader exits and sends the error to errCh.
+//   - ctx cancellation: clean shutdown, Reader exits with nil error.
+//
 // The Reader exits when:
 //   - ctx is cancelled (session shutdown)
-//   - transport.ReadPDU returns a fatal error (EOF, reset, timeout)
+//   - transport.ReadPDU returns a fatal error (EOF, reset)
 //
 // On exit, the error (if any) is sent to errCh so the Session can react.
+// errCh must be buffered (cap >= 1) or use non-blocking receive in Session.
 type Reader struct {
 	transport  SMPPTransport
 	codec      *Codec
