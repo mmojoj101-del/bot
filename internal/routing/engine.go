@@ -3,27 +3,29 @@ package routing
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
 
 // Engine is the main routing engine implementing Router.
-// It combines route matching, health filtering, and strategy-based selection.
 //
 // Lifecycle:
 //  1. Match routes by message destination (longest prefix)
-//  2. Filter unhealthy connectors (if HealthChecker available)
+//  2. Filter unhealthy connectors via HealthStatusProvider
 //  3. Determine strategy from the best matching route
-//  4. Create (or reuse) Selector for that strategy's RouteGroup
+//  4. Create (or reuse) Selector for the route group
 //  5. Apply selection strategy → RoutingDecision
 //
-// Selectors are cached by RouteGroupID (prefix:priority:strategy), NOT by strategy
-// alone. This ensures RoundRobin counters for prefix "1" and prefix "44" are
-// independent even if both use the same strategy.
+// Selectors are cached by a deterministic hash of the matched route group
+// (sorted route IDs + prefix + priority + strategy). This ensures stateful
+// selectors (RoundRobin, Weighted) are independent per group.
+// See: groupKey() for details.
 type Engine struct {
 	routes    []domain.Route
-	registry  ConnectorResolver
+	health    HealthStatusProvider
 	factory   SelectorFactory
 	selectors map[string]Selector
 	mu        sync.Mutex
@@ -31,22 +33,22 @@ type Engine struct {
 
 // NewEngine creates a routing Engine.
 //
-// routes: all enabled routes (matching/filtering happens internally)
-// registry: optional connector resolver for health checking (may be nil)
+// routes: all enabled routes for this tenant
+// health:  optional health status provider (nil = skip health filtering)
 // factory: optional selector factory (nil = use DefaultSelectorRegistry)
-func NewEngine(routes []domain.Route, registry ConnectorResolver, factory SelectorFactory) *Engine {
+func NewEngine(routes []domain.Route, health HealthStatusProvider, factory SelectorFactory) *Engine {
 	if factory == nil {
 		factory = DefaultSelectorRegistry
 	}
 	return &Engine{
 		routes:    routes,
-		registry:  registry,
+		health:    health,
 		factory:   factory,
 		selectors: make(map[string]Selector),
 	}
 }
 
-// Route selects a route for the given message.
+// Route selects a connector for the given message.
 func (e *Engine) Route(ctx context.Context, msg *domain.Message) (*domain.RoutingDecision, error) {
 	matcher := &RouteMatcher{}
 	candidates := matcher.Match(msg, e.routes)
@@ -55,7 +57,7 @@ func (e *Engine) Route(ctx context.Context, msg *domain.Message) (*domain.Routin
 	}
 
 	// Filter unhealthy connectors
-	healthy := e.filterHealthy(ctx, candidates)
+	healthy := e.filterHealthy(candidates)
 	if len(healthy) == 0 {
 		return nil, fmt.Errorf("routing: all matching routes have unhealthy connectors")
 	}
@@ -63,8 +65,9 @@ func (e *Engine) Route(ctx context.Context, msg *domain.Message) (*domain.Routin
 	// Determine strategy from the best-matching route (first in sorted order).
 	primary := healthy[0]
 
-	// Get or create selector for this route's strategy group.
-	selector, err := e.getOrCreateSelector(primary)
+	// Get or create selector for the route group (not just one route).
+	// The group key is derived from ALL routes in the healthy set.
+	selector, err := e.getOrCreateSelector(healthy, primary.Strategy)
 	if err != nil {
 		return nil, fmt.Errorf("routing: %w", err)
 	}
@@ -84,18 +87,42 @@ func (e *Engine) Route(ctx context.Context, msg *domain.Message) (*domain.Routin
 	}, nil
 }
 
-// RouteGroupID uniquely identifies a group of routes that share a selector.
-// Routes with the same prefix, priority, and strategy form a group — they share
-// one stateful selector (e.g., one RoundRobin counter per group).
-func RouteGroupID(r domain.Route) string {
-	return fmt.Sprintf("%s:%d:%s", r.Prefix, r.Priority, r.Strategy)
+// groupKey produces a deterministic key for a set of routes forming a group.
+//
+// The key is derived from ALL routes in the set (sorted by ID), not from a
+// single route. This ensures:
+//   - Two different route groups never collide, even if they share prefix+priority+strategy
+//   - Adding/removing a route from the group produces a new key (new selector)
+//   - The same set of routes always produces the same key (selector state preserved)
+//
+// Format: "id:prefix:priority:strategy|id:prefix:priority:strategy|..."
+func groupKey(routes []domain.Route) string {
+	sorted := make([]domain.Route, len(routes))
+	copy(sorted, routes)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].ID < sorted[j].ID
+	})
+
+	var b strings.Builder
+	for _, r := range sorted {
+		// id:prefix:priority:strategy|
+		b.WriteString(r.ID)
+		b.WriteByte(':')
+		b.WriteString(r.Prefix)
+		b.WriteByte(':')
+		b.WriteString(fmt.Sprintf("%d", r.Priority))
+		b.WriteByte(':')
+		b.WriteString(string(r.Strategy))
+		b.WriteByte('|')
+	}
+	return b.String()
 }
 
-// getOrCreateSelector returns a cached selector for the route's group,
-// creating one if needed. Keyed by RouteGroupID so different route groups
-// (e.g., Egypt round_robin vs Saudi round_robin) have independent state.
-func (e *Engine) getOrCreateSelector(route domain.Route) (Selector, error) {
-	key := RouteGroupID(route)
+// getOrCreateSelector returns a cached selector for the route group.
+// The cache key is derived from ALL routes in the group (sorted by ID),
+// ensuring independent state for each unique group.
+func (e *Engine) getOrCreateSelector(routes []domain.Route, strategy domain.RouteStrategy) (Selector, error) {
+	key := groupKey(routes)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -104,7 +131,7 @@ func (e *Engine) getOrCreateSelector(route domain.Route) (Selector, error) {
 		return s, nil
 	}
 
-	s, err := e.factory.Create(route.Strategy)
+	s, err := e.factory.Create(strategy)
 	if err != nil {
 		return nil, err
 	}
@@ -114,40 +141,19 @@ func (e *Engine) getOrCreateSelector(route domain.Route) (Selector, error) {
 }
 
 // filterHealthy returns routes whose connectors are healthy.
-//
-// TODO(v0.3): Replace per-Route() health checks with Background Health Monitor.
-//   Current approach calls CheckHealth() for every Route() call, which becomes
-//   prohibitively expensive at high throughput (20k+ msg/sec).
-//
-//   Future design:
-//
-//	type HealthMonitor interface {
-//	    Start(ctx context.Context)
-//	    IsHealthy(connectorID string) bool
-//	    Subscribe(connectorID string, callback func(healthy bool))
-//	}
-//
-//   Background Health Monitor updates atomic health states periodically.
-//   Engine reads IsHealthy() from the monitor — zero network calls during routing.
-func (e *Engine) filterHealthy(ctx context.Context, routes []domain.Route) []domain.Route {
-	if e.registry == nil {
-		return routes // no health checking
+// The Engine only calls HealthStatusProvider.IsHealthy() — it has no
+// knowledge of CheckHealth(), BackgroundHealthMonitor, or any other
+// health checking mechanism.
+func (e *Engine) filterHealthy(routes []domain.Route) []domain.Route {
+	if e.health == nil {
+		return routes // no health checking — assume all healthy
 	}
 
 	var healthy []domain.Route
 	for _, r := range routes {
-		conn, err := e.registry.Get(r.ConnectorID)
-		if err != nil {
-			continue // connector not found — skip route
+		if e.health.IsHealthy(r.ConnectorID) {
+			healthy = append(healthy, r)
 		}
-
-		if hc, ok := conn.(ConnectorHealthCheck); ok {
-			if err := hc.CheckHealth(ctx); err != nil {
-				continue // unhealthy — skip
-			}
-		}
-
-		healthy = append(healthy, r)
 	}
 	return healthy
 }
