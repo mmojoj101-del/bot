@@ -2,17 +2,18 @@ package pipeline
 
 import (
 	"github.com/raghna/fury-sms-gateway/internal/domain"
-	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
 
 // PipelineState is the single object passed through all pipeline stages.
 // It carries everything a stage needs and accumulates results.
+// PipelineState carries message context through all pipeline stages.
+// Each stage reads from relevant fields and populates its output field.
+// Fields are deliberately typed — no map[string]interface{} junk drawer.
 type PipelineState struct {
-	// Message is the canonical message being processed.
+	// Message is the canonical domain message being processed. Immutable in the pipeline.
 	Message *domain.Message
 
 	// Prepared is the output of PrepareStage (normalized destination, encoding, parts).
-	// Defined as domain.PreparedMessage to share the struct with domain.SendRequest.
 	Prepared *domain.PreparedMessage
 
 	// Decision is the routing decision (set by RouteStage, never modified after).
@@ -21,10 +22,8 @@ type PipelineState struct {
 	// SendResult is the result from the connector (set by SendStage).
 	SendResult *SendResult
 
-	// Error captures a failure from any stage.
-	Error error
-
 	// Attempt is the current retry attempt (0 = first attempt).
+	// Managed by the retry decorator wrapping the pipeline, not by pipeline stages.
 	Attempt int
 
 	// MaxRetries is the maximum number of retry attempts.
@@ -32,10 +31,6 @@ type PipelineState struct {
 
 	// TraceID is the cross-lifecycle trace identifier.
 	TraceID string
-
-	// Metadata is a mutable map for stages to pass data downstream.
-	// Namespace your keys (e.g., "prepare.encoding", "route.candidates").
-	Metadata map[string]interface{}
 }
 
 // RoutingDecision is an immutable value object set once by the Routing Engine.
@@ -67,25 +62,14 @@ type SendResult struct {
 	Status       domain.MessageStatus
 }
 
-// PipelineStateEvent converts a PipelineState into an EventEnvelope.
-// This enables stages to emit events without knowing the event bus.
-func PipelineStateEvent(state *PipelineState, eventType string, payload events.DomainEvent) events.EventEnvelope {
-	return events.EventEnvelope{
-		EventType:     eventType,
-		TraceID:       state.TraceID,
-		TenantID:      state.Message.TenantID,
-		CorrelationID: state.Message.ID,
-		// Payload is set by the caller with json.RawMessage
-	}
-}
+
 
 // NewPipelineState creates a new PipelineState for a message.
 func NewPipelineState(msg *domain.Message, traceID string) *PipelineState {
 	return &PipelineState{
-		Message:     msg,
-		TraceID:     traceID,
-		Attempt:     0,
-		MaxRetries:  3,
-		Metadata:    make(map[string]interface{}),
+		Message:    msg,
+		TraceID:    traceID,
+		Attempt:    0,
+		MaxRetries: 3,
 	}
 }

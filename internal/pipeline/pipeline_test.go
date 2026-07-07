@@ -46,7 +46,7 @@ func TestPipeline_Execute_AllStagesRun(t *testing.T) {
 	}
 
 	p := New(stage1, stage2, stage3)
-	state := &PipelineState{Metadata: make(map[string]interface{})}
+	state := NewPipelineState(nil, "")
 
 	err := p.Execute(context.Background(), state)
 	if err != nil {
@@ -88,7 +88,7 @@ func TestPipeline_Execute_StopsOnError(t *testing.T) {
 	}
 
 	p := New(stage1, stage2, stage3)
-	state := &PipelineState{Metadata: make(map[string]interface{})}
+	state := NewPipelineState(nil, "")
 
 	err := p.Execute(context.Background(), state)
 	if err == nil {
@@ -115,7 +115,7 @@ func TestPipeline_Execute_ContextCancellation(t *testing.T) {
 	}
 
 	p := New(stage)
-	state := &PipelineState{Metadata: make(map[string]interface{})}
+	state := NewPipelineState(nil, "")
 
 	err := p.Execute(ctx, state)
 	if err == nil {
@@ -158,7 +158,5 @@ func TestPipelineState_New(t *testing.T) {
 	if state.TraceID != "trace-1" {
 		t.Fatalf("expected trace-1, got %s", state.TraceID)
 	}
-	if state.Metadata == nil {
-		t.Fatal("expected non-nil metadata map")
-	}
+	// PipelineState has no Metadata field — structured fields only.
 }

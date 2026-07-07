@@ -89,11 +89,6 @@ func TestPipeline_ValidatePrepareRoute(t *testing.T) {
 		t.Fatalf("expected pipeline to succeed, got: %v", err)
 	}
 
-	// Validate stage passed
-	if state.Error != nil {
-		t.Fatalf("unexpected error: %v", state.Error)
-	}
-
 	// Prepare stage: PreparedMessage populated
 	if state.Prepared == nil {
 		t.Fatal("expected PreparedMessage from PrepareStage")

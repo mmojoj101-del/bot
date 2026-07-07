@@ -31,7 +31,7 @@ func TestValidateStage_NilState(t *testing.T) {
 
 func TestValidateStage_NilMessage(t *testing.T) {
 	s := NewValidateStage()
-	state := &PipelineState{Metadata: make(map[string]interface{})}
+	state := NewPipelineState(nil, "")
 	_, err := s.Process(context.Background(), state)
 	if !errors.Is(err, ErrNilMessage) {
 		t.Fatalf("expected ErrNilMessage, got: %v", err)
@@ -159,6 +159,5 @@ func validState() *PipelineState {
 		},
 		Attempt:    0,
 		MaxRetries: 3,
-		Metadata:   make(map[string]interface{}),
 	}
 }

@@ -35,9 +35,8 @@ func (p *Pipeline) Execute(ctx context.Context, state *PipelineState) error {
 		var err error
 		state, err = stage.Process(ctx, state)
 		if err != nil {
-			if state != nil {
-				state.Error = err
-			}
+			// Error is returned directly — not duplicated on state.
+			// Stages communicate through typed fields (Prepared, Decision, SendResult).
 			return fmt.Errorf("pipeline: stage %q failed: %w", stage.Name(), err)
 		}
 		if state == nil {
