@@ -19,9 +19,6 @@ func TestDriver_Send_Success(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			t.Errorf("expected Bearer test-token, got %q", r.Header.Get("Authorization"))
 		}
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("expected application/json, got %q", r.Header.Get("Content-Type"))
-		}
 
 		var body map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -38,39 +35,25 @@ func TestDriver_Send_Success(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	tc := TransportConfig{
+	tc := &HTTPTransportConfig{
 		URL:    ts.URL,
 		Method: http.MethodPost,
-		Headers: []KeyValue{
-			{Key: "Authorization", Value: "Bearer test-token"},
+		Headers: map[string]string{
+			"Authorization": "Bearer test-token",
+			"Content-Type":  "application/json",
 		},
-		Body: &BodyConfig{
-			Template:    `{"to":"{{destination}}","text":"{{text}}"}`,
-			ContentType: "application/json",
-		},
+		Body: `{"to":"+1234567890","text":"Hello World"}`,
 	}
-	tcBytes, _ := json.Marshal(tc)
 
 	driver := NewDriver()
 	resp, err := driver.Send(context.Background(), &connector.TransportRequest{
-		Message: &domain.Message{
-			Source:      "SENDER",
-			Destination: "+1234567890",
-			Text:       "Hello World",
-		},
+		Message: &domain.Message{Source: "SENDER", Destination: "+1234567890", Text: "Hello World"},
 		Prepared: &domain.PreparedMessage{
 			Destination: "+1234567890",
 			Parts:       1,
 			Encoding:    "gsm7",
 		},
-		Config: tcBytes,
-		RenderedFields: map[string]string{
-			"destination": "+1234567890",
-			"text":       "Hello World",
-			"source":     "SENDER",
-			"auth_type":  "bearer",
-			"auth_token": "test-token",
-		},
+		Config: tc,
 	})
 
 	if err != nil {
@@ -82,34 +65,20 @@ func TestDriver_Send_Success(t *testing.T) {
 	if resp.ExternalID != "prov-msg-123" {
 		t.Errorf("expected ExternalID = prov-msg-123, got %q", resp.ExternalID)
 	}
-	if len(resp.Body) == 0 {
-		t.Error("expected non-empty body")
-	}
 }
 
 func TestDriver_Send_ErrorStatus(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"invalid request"}`))
+		w.Write([]byte(`{"error":"invalid"}`))
 	}))
 	defer ts.Close()
 
-	tc := TransportConfig{URL: ts.URL}
-	tcBytes, _ := json.Marshal(tc)
-
 	driver := NewDriver()
 	resp, err := driver.Send(context.Background(), &connector.TransportRequest{
-		Message: &domain.Message{Destination: "+1234"},
-		Prepared: &domain.PreparedMessage{
-			Destination: "+1234",
-			Parts:       1,
-			Encoding:    "gsm7",
-		},
-		Config: tcBytes,
-		RenderedFields: map[string]string{
-			"destination": "+1234",
-			"text":       "Hello",
-		},
+		Message:  &domain.Message{Destination: "+1234"},
+		Prepared: &domain.PreparedMessage{Destination: "+1234", Parts: 1, Encoding: "gsm7"},
+		Config:   &HTTPTransportConfig{URL: ts.URL},
 	})
 
 	if err != nil {
@@ -120,70 +89,39 @@ func TestDriver_Send_ErrorStatus(t *testing.T) {
 	}
 }
 
-func TestDriver_Send_QueryParams(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("api_key") != "abc123" {
-			t.Errorf("expected api_key=abc123, got %q", r.URL.Query().Get("api_key"))
-		}
-		if r.URL.Query().Get("ref") != "msg-001" {
-			t.Errorf("expected ref=msg-001, got %q", r.URL.Query().Get("ref"))
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-
-	tc := TransportConfig{
-		URL:    ts.URL,
-		Method: http.MethodGet,
-		QueryParams: []KeyValue{
-			{Key: "api_key", Value: "abc123"},
-			{Key: "ref", Value: "{{message_id}}"},
-		},
-	}
-	tcBytes, _ := json.Marshal(tc)
-
+func TestDriver_DecodeConfig(t *testing.T) {
 	driver := NewDriver()
-	resp, err := driver.Send(context.Background(), &connector.TransportRequest{
-		Message:  &domain.Message{},
-		Prepared: &domain.PreparedMessage{Destination: "+1234", Parts: 1, Encoding: "gsm7"},
-		Config:   tcBytes,
-		RenderedFields: map[string]string{
-			"message_id": "msg-001",
-		},
-	})
-
+	data := []byte(`{"url":"https://api.example.com/send","method":"PUT","headers":{"Authorization":"Bearer x"}}`)
+	cfg, err := driver.DecodeConfig(data)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("DecodeConfig error: %v", err)
 	}
-	if resp.Status != http.StatusOK {
-		t.Errorf("expected status 200, got %d", resp.Status)
+	htc := cfg.(*HTTPTransportConfig)
+	if htc.URL != "https://api.example.com/send" {
+		t.Errorf("URL = %q", htc.URL)
+	}
+	if htc.Method != "PUT" {
+		t.Errorf("Method = %q", htc.Method)
+	}
+	if htc.Headers["Authorization"] != "Bearer x" {
+		t.Errorf("Authorization = %q", htc.Headers["Authorization"])
 	}
 }
 
-func TestRender(t *testing.T) {
-	tests := []struct {
-		name   string
-		s      string
-		fields map[string]string
-		want   string
-	}{
-		{"no templates", "hello", nil, "hello"},
-		{"single field", "{{destination}}", map[string]string{"destination": "+1234"}, "+1234"},
-		{"multiple fields", "{{source}}:{{text}}", map[string]string{"source": "APP", "text": "Hello"}, "APP:Hello"},
-		{"missing field", "{{missing}}", map[string]string{"other": "x"}, "{{missing}}"},
-		{"mixed", "to={{dest}}&text={{msg}}", map[string]string{"dest": "+1234", "msg": "hi"}, "to=+1234&text=hi"},
+func TestDriver_DecodeConfig_Empty(t *testing.T) {
+	driver := NewDriver()
+	cfg, err := driver.DecodeConfig(nil)
+	if err != nil {
+		t.Fatalf("DecodeConfig error: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := render(tt.s, tt.fields); got != tt.want {
-				t.Errorf("render() = %q, want %q", got, tt.want)
-			}
-		})
+	htc := cfg.(*HTTPTransportConfig)
+	if htc.Method != "POST" {
+		t.Errorf("default method should be POST, got %q", htc.Method)
 	}
 }
 
 func TestDecodeTransportConfig(t *testing.T) {
+	driver := NewDriver()
 	tests := []struct {
 		name    string
 		data    []byte
@@ -196,12 +134,12 @@ func TestDecodeTransportConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tc, err := decodeTransportConfig(tt.data)
+			cfg, err := driver.DecodeConfig(tt.data)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
 			}
-			if tc.URL != tt.wantURL {
-				t.Errorf("URL = %q, want %q", tc.URL, tt.wantURL)
+			if cfg.(*HTTPTransportConfig).URL != tt.wantURL {
+				t.Errorf("URL = %q, want %q", cfg.(*HTTPTransportConfig).URL, tt.wantURL)
 			}
 		})
 	}

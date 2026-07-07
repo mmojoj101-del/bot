@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,20 +14,15 @@ import (
 )
 
 // GenericConnector is the protocol-agnostic connector implementation.
-// It implements the Connector interface by orchestrating a ProtocolDriver
-// with shared infrastructure (template engine, rule engine, circuit breaker, metrics).
+// It implements Connector + HealthChecker by orchestrating:
+//   - Template Engine (render message fields into transport config)
+//   - Auth (render credentials into transport config)
+//   - ProtocolDriver (raw transport, no business logic)
+//   - Rule Engine (evaluate transport response)
+//   - Circuit Breaker (protect downstream)
+//   - Metrics (record outcomes)
 //
-// Architecture:
-//
-//	GenericConnector
-//	  ├── Template Engine ── render{{Source}}, {{Destination}}, {{Text}} into fields
-//	  ├── ProtocolDriver ─── raw transport send (HTTP, SMPP, SIP, ...)
-//	  ├── Rule Engine ────── evaluate response → accept/reject/retry/extract
-//	  ├── Circuit Breaker ── protect downstream resources
-//	  └── Metrics ────────── record success/failure/latency
-//
-// No protocol-specific code exists here. Adding a new protocol requires
-// only a new ProtocolDriver implementation.
+// The GenericConnector has zero knowledge of HTTP, SMPP, SIP, or any protocol.
 type GenericConnector struct {
 	id       string
 	protocol domain.ConnectorType
@@ -35,37 +31,26 @@ type GenericConnector struct {
 
 	tmpl       *template.Engine
 	ruleEngine *rule.Engine
-
-	metrics domain.MetricsRecorder
+	metrics    domain.MetricsRecorder
 
 	mu   sync.Mutex
 	once sync.Once
 }
 
-// GenericConnectorOption configures the GenericConnector.
 type GenericConnectorOption func(*GenericConnector)
 
-// WithTemplateEngine sets a shared template engine.
 func WithTemplateEngine(tmpl *template.Engine) GenericConnectorOption {
 	return func(c *GenericConnector) { c.tmpl = tmpl }
 }
 
-// WithRuleEngine sets a shared rule engine.
 func WithRuleEngine(re *rule.Engine) GenericConnectorOption {
 	return func(c *GenericConnector) { c.ruleEngine = re }
 }
 
-// WithMetricsRecorder attaches a metrics recorder.
 func WithMetricsRecorder(m domain.MetricsRecorder) GenericConnectorOption {
 	return func(c *GenericConnector) { c.metrics = m }
 }
 
-// NewGenericConnector creates a connector that works with any protocol.
-//
-// id: unique connector identifier
-// protocol: protocol type (ConnectorTypeHTTPClient, ConnectorTypeSMPP, ...)
-// config: ConnectorConfig loaded from DB
-// driver: ProtocolDriver for the actual transport
 func NewGenericConnector(
 	id string,
 	protocol domain.ConnectorType,
@@ -86,13 +71,9 @@ func NewGenericConnector(
 	return c
 }
 
-// ID returns the unique connector identifier.
-func (c *GenericConnector) ID() string { return c.id }
-
-// Protocol returns the protocol type.
+func (c *GenericConnector) ID() string                   { return c.id }
 func (c *GenericConnector) Protocol() domain.ConnectorType { return c.protocol }
 
-// lazyInit initializes shared components on first use.
 func (c *GenericConnector) lazyInit() {
 	c.once.Do(func() {
 		c.mu.Lock()
@@ -108,16 +89,15 @@ func (c *GenericConnector) lazyInit() {
 
 // Send implements the Connector interface.
 //
-// Execution flow:
-//  1. Check circuit breaker
-//  2. Build template data from message
-//  3. Render configured template fields
-//  4. Build TransportRequest with raw config + rendered fields
-//  5. Call driver.Send() — raw transport, no interpretation
+// Flow:
+//  1. Render template data from message + prepared
+//  2. Render auth credentials into fields map
+//  3. Render transport JSON (replace {{key}} with field values)
+//  4. Decode rendered JSON via driver.DecodeConfig() → typed TransportConfig
+//  5. driver.Send(ctx, TransportRequest{Config: typedConfig})
 //  6. Build rule.ResponseData from TransportResponse
 //  7. Evaluate rules → accept/reject/retry/extract
-//  8. Record metrics, update circuit breaker
-//  9. Return domain.SendResult
+//  8. Record metrics, return domain.SendResult
 func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*domain.SendResult, error) {
 	c.lazyInit()
 
@@ -152,57 +132,57 @@ func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*
 		}
 		renderedFields[key] = rendered
 	}
-	// Add standard fields as rendered fields for drivers that need them
+	// Standard fields always available
 	renderedFields["source"] = data.Source
 	renderedFields["destination"] = data.Destination
 	renderedFields["text"] = data.Text
 	renderedFields["message_id"] = data.MessageID
 	renderedFields["tenant_id"] = data.TenantID
 	renderedFields["client_ref"] = data.ClientRef
+	renderedFields["parts"] = fmt.Sprintf("%d", data.Parts)
+	renderedFields["encoding"] = data.Encoding
 
-	// 3. Build transport request (raw config, no driver interpretation)
-	transportReq := &TransportRequest{
-		Message:        req.Message,
-		Prepared:       req.Prepared,
-		Config:         c.config.Transport,
-		RenderedFields: renderedFields,
+	// 3. Render auth credentials into fields map
+	renderAuthCredentials(&c.config.Auth, renderedFields)
+
+	// 4. Render transport JSON: replace {{key}} with rendered values
+	renderedTransport := renderJSON(string(c.config.Transport), renderedFields)
+
+	// 5. Decode via driver
+	transportConfig, err := c.driver.DecodeConfig([]byte(renderedTransport))
+	if err != nil {
+		return nil, fmt.Errorf("connector %q: decode transport config: %w", c.id, err)
 	}
 
-	// 4. Send via driver (raw transport)
+	// 6. Build TransportRequest (no RenderedFields, no raw config — just typed config)
+	transportReq := &TransportRequest{
+		Message:  req.Message,
+		Prepared: req.Prepared,
+		Config:   transportConfig,
+	}
+
+	// 7. Send via driver (raw transport, no interpretation)
 	transportResp, err := c.driver.Send(ctx, transportReq)
 	latency := time.Since(start)
 
 	if err != nil {
 		c.recordFailure(req.Message.TenantID, "transport_error", latency)
-		return nil, fmt.Errorf("connector %q: transport: %w", c.id, err)
+		return nil, fmt.Errorf("connector %q: send: %w", c.id, err)
 	}
 
-	// 5. Build rule response data from raw transport response
-	ruleResp := rule.ResponseData{
-		Status:  transportResp.Status,
-		Headers: transportResp.Headers,
-		Body:    transportResp.Body,
-	}
+	// 8. Build rule response data
+	ruleResp := c.buildRuleResponse(transportResp, renderedFields)
 
-	// Try to parse JSON body if present
-	if len(transportResp.Body) > 0 {
-		var parsed map[string]interface{}
-		if err := json.Unmarshal(transportResp.Body, &parsed); err == nil {
-			ruleResp.Parsed = parsed
-		}
-	}
-
-	// 6. Evaluate rules
+	// 9. Evaluate rules
 	rulesResult := c.ruleEngine.Evaluate(c.config.Rules.Rules, ruleResp)
 
-	// 7. Determine acceptance and extract fields
+	// 10. Determine acceptance
 	acceptance := c.determineAcceptance(rulesResult)
 	externalID := transportResp.ExternalID
 	if externalID == "" {
 		externalID = rulesResult.Extract["external_id"]
 	}
 
-	// Extract optional fields
 	parts := req.Prepared.Parts
 	if p := rulesResult.Extract["parts"]; p != "" {
 		if v, err := parseInt(p); err == nil {
@@ -216,7 +196,6 @@ func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*
 		}
 	}
 
-	// 8. Build SendResult
 	result := &domain.SendResult{
 		ExternalID: externalID,
 		Parts:      parts,
@@ -227,7 +206,6 @@ func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*
 		Acceptance: acceptance,
 	}
 
-	// 9. Record metrics & circuit breaker
 	if rulesResult.Accepted {
 		c.recordSuccess(req.Message.TenantID, result.Parts, latency)
 	} else if rulesResult.Rejected {
@@ -237,18 +215,44 @@ func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*
 	return result, nil
 }
 
-// CheckHealth implements the HealthChecker interface.
 func (c *GenericConnector) CheckHealth(ctx context.Context) error {
 	c.lazyInit()
-
 	if !c.config.Health.Enabled {
-		return nil // health checking disabled — assume healthy
+		return nil
 	}
-
 	return c.driver.CheckHealth(ctx)
 }
 
-// determineAcceptance maps rule result to AcceptanceKind.
+// buildRuleResponse constructs rule.ResponseData from TransportResponse.
+func (c *GenericConnector) buildRuleResponse(resp *TransportResponse, fields map[string]string) rule.ResponseData {
+	r := rule.ResponseData{
+		Status:  resp.Status,
+		Headers: resp.Headers,
+		Body:    resp.Body,
+		Fields:  make(map[string]string),
+	}
+
+	// Copy all rendered fields for rule access
+	for k, v := range fields {
+		r.Fields[k] = v
+	}
+	// Add transport metadata
+	r.Fields["latency_ms"] = fmt.Sprintf("%d", resp.Latency.Milliseconds())
+	if resp.ExternalID != "" {
+		r.Fields["external_id"] = resp.ExternalID
+	}
+
+	// Try JSON parse
+	if len(resp.Body) > 0 {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(resp.Body, &parsed); err == nil {
+			r.Parsed = parsed
+		}
+	}
+
+	return r
+}
+
 func (c *GenericConnector) determineAcceptance(r rule.Result) domain.AcceptanceKind {
 	switch {
 	case r.Accepted:
@@ -274,7 +278,32 @@ func (c *GenericConnector) recordFailure(tenantID string, reason string, latency
 	}
 }
 
-// noopMetricsRecorder is a safe default that does nothing.
+// renderAuthCredentials renders auth config into the fields map as template variables.
+// The transport config references these with {{auth_token}}, {{auth_username}}, etc.
+func renderAuthCredentials(cfg *AuthConfig, fields map[string]string) {
+	if cfg == nil {
+		return
+	}
+	fields["auth_type"] = cfg.Type
+	for k, v := range cfg.Credentials {
+		fields["auth_"+k] = v
+	}
+}
+
+// renderJSON replaces {{key}} patterns with values from the fields map.
+// This is a simple string replacement — NOT a full template engine.
+// Full Go template rendering is done by template.Engine for template fields.
+func renderJSON(s string, fields map[string]string) string {
+	if !strings.Contains(s, "{{") {
+		return s
+	}
+	for k, v := range fields {
+		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
+	}
+	return s
+}
+
+// noopMetricsRecorder is a safe default.
 type noopMetricsRecorder struct{}
 
 func (noopMetricsRecorder) RecordMessageSent(_, _ string, _ int, _ time.Duration) {}
@@ -282,7 +311,6 @@ func (noopMetricsRecorder) RecordMessageFailed(_, _, _ string)                  
 func (noopMetricsRecorder) RecordRetry(_ string, _ int)                           {}
 func (noopMetricsRecorder) RecordDLRReceived(_, _ string)                         {}
 
-// parseInt and parseInt64 are helpers for string-to-int conversion.
 func parseInt(s string) (int, error) {
 	var v int
 	_, err := fmt.Sscanf(s, "%d", &v)
@@ -295,6 +323,5 @@ func parseInt64(s string) (int64, error) {
 	return v, err
 }
 
-// Compile-time interface check.
 var _ Connector = (*GenericConnector)(nil)
 var _ HealthChecker = (*GenericConnector)(nil)

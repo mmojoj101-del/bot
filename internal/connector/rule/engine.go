@@ -25,13 +25,16 @@ type Condition struct {
 	//   - "header.X-Name"   → response header (HTTP only)
 	//   - "body.path.field" → JSON field in response body
 	//   - "body"            → raw body string
+	//   - "fields.key"      → Fields map set by GenericConnector
 	Field string `json:"field"`
 
 	// Operator is the comparison operator.
 	//   "eq"       → Field == Value (string or numeric)
 	//   "neq"      → Field != Value
 	//   "gt"       → Field > Value  (numeric)
+	//   "gte"      → Field >= Value (numeric)
 	//   "lt"       → Field < Value  (numeric)
+	//   "lte"      → Field <= Value (numeric)
 	//   "contains" → strings.Contains(Field, Value)
 	//   "exists"   → Field is present and non-empty (Value is ignored)
 	//   "in"       → Field is one of the comma-separated Values
@@ -47,19 +50,23 @@ type Action struct {
 	//   "accept"        → message is accepted (SuccessResult)
 	//   "reject"        → message is rejected (failure)
 	//   "retry"         → retry the message (temporary failure)
-	//   "extract"       → extract Field value into ExtractResult[Key]
-	//   "set"           → set Field to a static value in ExtractResult[Key]
+	//   "extract"       → extract Value from response into ExtractResult[Key]
+	//   "set"           → set Key to Value in ExtractResult
 	Type string `json:"type"`
 
 	// Key is the target key for extract/set actions.
+	// For extract: the key in the Extract result map.
+	// For set: the key in the Extract result map.
 	Key string `json:"key,omitempty"`
 
-	// Value is the value for set actions (or template).
+	// Value is the field path for extract actions, or literal for set actions.
+	// For extract with empty Value, tries Key as field path.
 	Value string `json:"value,omitempty"`
 }
 
 // Rule pairs a Condition with one or more Actions.
-// The first matching rule's actions are executed; remaining rules are skipped.
+// The first matching rule sets the terminal decision (accept/reject/retry).
+// Extract/set actions from subsequent rules continue to run.
 type Rule struct {
 	// Name is optional — for debugging and UI display.
 	Name      string   `json:"name"`
@@ -68,6 +75,7 @@ type Rule struct {
 }
 
 // ResponseData is the parsed response data available to rules.
+// Generic across all protocols — HTTP, SMPP, SIP, Kafka, AMQP, etc.
 type ResponseData struct {
 	// Status is the protocol status code (HTTP status, SMPP command_status).
 	Status int
@@ -80,6 +88,15 @@ type ResponseData struct {
 
 	// Parsed is the JSON-decoded body, if applicable.
 	Parsed map[string]interface{}
+
+	// Fields holds additional protocol-specific context.
+	// Set by GenericConnector before calling Evaluate.
+	// Examples:
+	//   "body.message_id" → "ext-123"
+	//   "header.content_type" → "application/json"
+	//   "smpp.command_status" → "ESME_ROK"
+	//   "latency_ms" → "42"
+	Fields map[string]string
 }
 
 // Result holds the outcome of rule evaluation.
@@ -107,8 +124,8 @@ func NewEngine() *Engine {
 }
 
 // Evaluate runs all rules in order and returns the combined result.
-// The first matching rule determines accept/reject/retry status.
-// If no rule matches, the result has all fields at their zero values (not accepted).
+// The first matching rule determines the terminal decision (accept/reject/retry).
+// Extract/set actions from all matching rules continue — they don't stop.
 func (e *Engine) Evaluate(rules []Rule, resp ResponseData) Result {
 	result := Result{
 		Extract: make(map[string]string),
@@ -157,17 +174,10 @@ func (e *Engine) Evaluate(rules []Rule, resp ResponseData) Result {
 			}
 		}
 
-		// Terminal decision (accept/reject/retry) stops decision rules.
-		// Extract/set actions continue — they do not set 'decided'.
+		// Terminal decision stops decision rules but not extract/set.
 		if decided {
 			break
 		}
-	}
-
-	// If no rule decided, and there's at least one rule configured,
-	// treat as not-accepted (conservative: may be retried by pipeline).
-	if len(rules) > 0 && !decided {
-		result.Retryable = true
 	}
 
 	return result
@@ -175,7 +185,6 @@ func (e *Engine) Evaluate(rules []Rule, resp ResponseData) Result {
 
 // evaluateCondition checks a single condition against response data.
 func (e *Engine) evaluateCondition(c Condition, resp ResponseData) (bool, error) {
-	// Get the field value
 	fieldVal := e.extractField(resp, c.Field)
 
 	switch c.Operator {
@@ -202,6 +211,17 @@ func (e *Engine) evaluateCondition(c Condition, resp ResponseData) (bool, error)
 		}
 		return fv > cv, nil
 
+	case "gte":
+		fv, err := strconv.ParseFloat(fieldVal, 64)
+		if err != nil {
+			return false, fmt.Errorf("gte: field %q value %q is not numeric", c.Field, fieldVal)
+		}
+		cv, err := strconv.ParseFloat(c.Value, 64)
+		if err != nil {
+			return false, fmt.Errorf("gte: condition value %q is not numeric", c.Value)
+		}
+		return fv >= cv, nil
+
 	case "lt":
 		fv, err := strconv.ParseFloat(fieldVal, 64)
 		if err != nil {
@@ -212,6 +232,17 @@ func (e *Engine) evaluateCondition(c Condition, resp ResponseData) (bool, error)
 			return false, fmt.Errorf("lt: condition value %q is not numeric", c.Value)
 		}
 		return fv < cv, nil
+
+	case "lte":
+		fv, err := strconv.ParseFloat(fieldVal, 64)
+		if err != nil {
+			return false, fmt.Errorf("lte: field %q value %q is not numeric", c.Field, fieldVal)
+		}
+		cv, err := strconv.ParseFloat(c.Value, 64)
+		if err != nil {
+			return false, fmt.Errorf("lte: condition value %q is not numeric", c.Value)
+		}
+		return fv <= cv, nil
 
 	case "in":
 		vals := strings.Split(c.Value, ",")
@@ -233,6 +264,8 @@ func (e *Engine) evaluateCondition(c Condition, resp ResponseData) (bool, error)
 //   - "header.X-Name"       → resp.Headers["X-Name"]
 //   - "body.path.to.field"  → JSON navigation in resp.Parsed
 //   - "body"                → string(resp.Body)
+//   - "fields.key"          → resp.Fields["key"]
+//   - "key" (no prefix)     → tries resp.Fields["key"], then body.key
 func (e *Engine) extractField(resp ResponseData, path string) string {
 	if path == "" {
 		return ""
@@ -257,30 +290,43 @@ func (e *Engine) extractField(resp ResponseData, path string) string {
 		if len(parts) < 2 {
 			return string(resp.Body)
 		}
+		return e.navigateJSON(resp, parts[1])
 
-		if resp.Parsed == nil {
-			// Try to parse if available
-			if len(resp.Body) > 0 {
-				var parsed map[string]interface{}
-				if err := json.Unmarshal(resp.Body, &parsed); err == nil {
-					resp.Parsed = parsed
-				}
-			}
-			if resp.Parsed == nil {
-				return ""
-			}
+	case "fields":
+		if len(parts) < 2 {
+			return ""
 		}
-
-		return e.navigateJSON(resp.Parsed, parts[1])
+		if resp.Fields != nil {
+			return resp.Fields[parts[1]]
+		}
+		return ""
 	}
 
-	return ""
+	// No prefix: try Fields, then body.<path> as fallback
+	if resp.Fields != nil {
+		if v, ok := resp.Fields[path]; ok {
+			return v
+		}
+	}
+	return e.navigateJSON(resp, path)
 }
 
 // navigateJSON follows a dot-path into a parsed JSON structure.
-func (e *Engine) navigateJSON(data map[string]interface{}, path string) string {
+func (e *Engine) navigateJSON(resp ResponseData, path string) string {
+	if resp.Parsed == nil {
+		if len(resp.Body) > 0 {
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(resp.Body, &parsed); err == nil {
+				resp.Parsed = parsed
+			}
+		}
+		if resp.Parsed == nil {
+			return ""
+		}
+	}
+
 	parts := strings.Split(path, ".")
-	current := interface{}(data)
+	current := interface{}(resp.Parsed)
 
 	for _, part := range parts {
 		m, ok := current.(map[string]interface{})

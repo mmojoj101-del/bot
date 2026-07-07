@@ -16,7 +16,15 @@ type mockDriver struct {
 	healthFunc func(ctx context.Context) error
 }
 
+// mockConfig is a simple TransportConfig for testing.
+type mockConfig struct{}
+func (m *mockConfig) Protocol() domain.ConnectorType { return "mock" }
+
 func (m *mockDriver) Protocol() domain.ConnectorType { return m.protocol }
+
+func (m *mockDriver) DecodeConfig(_ []byte) (TransportConfig, error) {
+	return &mockConfig{}, nil
+}
 
 func (m *mockDriver) Send(ctx context.Context, req *TransportRequest) (*TransportResponse, error) {
 	if m.sendFunc != nil {
