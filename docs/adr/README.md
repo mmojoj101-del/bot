@@ -18,6 +18,7 @@ This directory contains Architecture Decision Records (ADRs) for the Fury Commun
 | 0009 | [Capability Negotiation (String-Based)](ADR-0009-capability-negotiation.md) | ✅ Accepted | 2026-07-06 |
 | 0010 | [Retry Engine as Independent Service](ADR-0010-retry-engine.md) | ✅ Accepted | 2026-07-06 |
 | 0011 | [Scheduler as Independent Component](ADR-0011-scheduler.md) | ✅ Accepted | 2026-07-06 |
+| 0012 | [SMPP Driver Architecture — Session Engine](ADR-0012-smpp-driver-architecture.md) | ✅ Accepted | 2026-07-07 |
 
 ## ADR Lifecycle
 
