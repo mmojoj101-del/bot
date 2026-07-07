@@ -269,32 +269,40 @@ func (c *GenericConnector) Reconfigure(config ConnectorConfig) {
 
 // Connect establishes a session for stateful drivers (SMPP, SIP).
 // No-op for stateless drivers (HTTP). Uses cached hook — zero type assertion.
+// Mutex is released BEFORE network I/O to avoid blocking other operations.
 func (c *GenericConnector) Connect(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if !c.hooks.hasStatefulSession() {
+		c.mu.Unlock()
 		return nil
 	}
 	if c.hooks.statefulDriver.IsConnected() {
+		c.mu.Unlock()
 		return nil
 	}
-	return c.hooks.statefulDriver.Connect(ctx)
+	sd := c.hooks.statefulDriver
+	c.mu.Unlock() // ← release before network I/O
+
+	return sd.Connect(ctx)
 }
 
 // Disconnect tears down a session for stateful drivers.
 // No-op for stateless drivers. Uses cached hook — zero type assertion.
+// Mutex is released BEFORE network I/O.
 func (c *GenericConnector) Disconnect(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if !c.hooks.hasStatefulSession() {
+		c.mu.Unlock()
 		return nil
 	}
 	if !c.hooks.statefulDriver.IsConnected() {
+		c.mu.Unlock()
 		return nil
 	}
-	return c.hooks.statefulDriver.Disconnect(ctx)
+	sd := c.hooks.statefulDriver
+	c.mu.Unlock() // ← release before network I/O
+
+	return sd.Disconnect(ctx)
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -480,18 +488,44 @@ func renderReflect(val reflect.Value, fields map[string]string) error {
 			elem := val.MapIndex(key)
 			switch elem.Kind() {
 			case reflect.String:
+				// map[string]string — direct settable values
 				newVal := renderString(elem.String(), fields)
 				if newVal != elem.String() {
 					val.SetMapIndex(key, reflect.ValueOf(newVal))
 				}
-			case reflect.Ptr, reflect.Struct, reflect.Interface:
+
+			case reflect.Interface:
+				// map[string]interface{} — values are not directly settable.
+				// Unwrap one level so leaf strings can be SetMapIndex on parent map.
+				elem = elem.Elem()
+				switch elem.Kind() {
+				case reflect.String:
+					newVal := renderString(elem.String(), fields)
+					if newVal != elem.String() {
+						val.SetMapIndex(key, reflect.ValueOf(newVal))
+					}
+				default:
+					// Deeper containers (map, slice, struct) go through recursion.
+					// We must create a mutable copy because MapIndex values are not
+					// addressable. We mutate the copy, then SetMapIndex it back.
+					copy := reflect.New(elem.Type()).Elem()
+					copy.Set(elem)
+					if err := renderReflect(copy, fields); err != nil {
+						return err
+					}
+					val.SetMapIndex(key, copy)
+				}
+
+			case reflect.Ptr, reflect.Struct:
 				if err := renderReflect(elem, fields); err != nil {
 					return err
 				}
+
 			case reflect.Map:
 				if err := renderReflect(elem, fields); err != nil {
 					return err
 				}
+
 			case reflect.Slice, reflect.Array:
 				if err := renderReflect(elem, fields); err != nil {
 					return err
@@ -503,9 +537,27 @@ func renderReflect(val reflect.Value, fields map[string]string) error {
 		for i := 0; i < val.Len(); i++ {
 			elem := val.Index(i)
 			switch elem.Kind() {
-			case reflect.Ptr, reflect.Struct, reflect.Interface, reflect.Map:
+			case reflect.Ptr, reflect.Struct, reflect.Map:
 				if err := renderReflect(elem, fields); err != nil {
 					return err
+				}
+			case reflect.Interface:
+				// []interface{} — slice elements may not be addressable.
+				// For strings, mutate in-place; for containers, copy-set.
+				elem = elem.Elem()
+				switch elem.Kind() {
+				case reflect.String:
+					newVal := renderString(elem.String(), fields)
+					if newVal != elem.String() {
+						elem.SetString(newVal)
+					}
+				default:
+					copy := reflect.New(elem.Type()).Elem()
+					copy.Set(elem)
+					if err := renderReflect(copy, fields); err != nil {
+						return err
+					}
+					val.Index(i).Set(copy)
 				}
 			case reflect.String:
 				newVal := renderString(elem.String(), fields)
@@ -523,9 +575,25 @@ func renderReflect(val reflect.Value, fields map[string]string) error {
 		for i := 0; i < val.Len(); i++ {
 			elem := val.Index(i)
 			switch elem.Kind() {
-			case reflect.Ptr, reflect.Struct, reflect.Interface, reflect.Map:
+			case reflect.Ptr, reflect.Struct, reflect.Map:
 				if err := renderReflect(elem, fields); err != nil {
 					return err
+				}
+			case reflect.Interface:
+				elem = elem.Elem()
+				switch elem.Kind() {
+				case reflect.String:
+					newVal := renderString(elem.String(), fields)
+					if newVal != elem.String() {
+						elem.SetString(newVal)
+					}
+				default:
+					copy := reflect.New(elem.Type()).Elem()
+					copy.Set(elem)
+					if err := renderReflect(copy, fields); err != nil {
+						return err
+					}
+					val.Index(i).Set(copy)
 				}
 			case reflect.String:
 				newVal := renderString(elem.String(), fields)
