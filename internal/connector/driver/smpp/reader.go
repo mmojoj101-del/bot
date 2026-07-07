@@ -21,10 +21,10 @@ import (
 //   - Retry or reconnect logic
 //
 // Error handling:
-//   - Malformed PDU (Decode error): the PDU was fully consumed from the
-//     transport (ReadPDU returns complete frames). The stream is NOT
-//     desynchronized because the 4-byte length prefix determined exactly
-//     how many bytes to read. So continuing is safe — log and move on.
+//   - Decode error (malformed PDU): per Codec contract, the bytes are fully
+//     consumed and the stream position is correct. The error is NON-FATAL —
+//     log and continue reading. Reader does NOT make this decision; it follows
+//     the Codec's error contract.
 //   - Transport error (EOF, reset, timeout): fatal — the stream is broken.
 //     The Reader exits and sends the error to errCh.
 //   - ctx cancellation: clean shutdown, Reader exits with nil error.

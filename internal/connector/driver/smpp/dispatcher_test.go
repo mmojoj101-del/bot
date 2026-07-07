@@ -20,11 +20,11 @@ func (m *mockPendingRespHandler) HandleResponse(resp PDU) {
 
 type mockDeliverSMHandler struct {
 	calls       atomic.Int32
-	returnResp  *DeliverSMResp
+	returnResp  PDU
 	returnError error
 }
 
-func (m *mockDeliverSMHandler) HandleDeliverSM(pdu *DeliverSM) (*DeliverSMResp, error) {
+func (m *mockDeliverSMHandler) HandleDeliverSM(pdu *DeliverSM) (PDU, error) {
 	m.calls.Add(1)
 	return m.returnResp, m.returnError
 }
@@ -283,7 +283,7 @@ func TestDispatcher_CustomRegistration(t *testing.T) {
 
 	// Register a handler for a custom/vendor command ID
 	customCmd := CommandID(0x00000FFF)
-	d.Register(customCmd, func(pdu PDU) *DeliverSMResp {
+	d.Register(customCmd, func(pdu PDU) PDU {
 		customCalls.Add(1)
 		return nil
 	})
@@ -305,7 +305,7 @@ func TestDispatcher_RegisterAfterFreeze_Panics(t *testing.T) {
 
 	d := NewDispatcher(nil, nil, nil, nil, nil, nil)
 	d.Freeze()
-	d.Register(CommandID(0xDEAD), func(pdu PDU) *DeliverSMResp { return nil })
+	d.Register(CommandID(0xDEAD), func(pdu PDU) PDU { return nil })
 }
 
 func TestDispatcher_AutoFreezeOnDispatch(t *testing.T) {
@@ -320,5 +320,5 @@ func TestDispatcher_AutoFreezeOnDispatch(t *testing.T) {
 			t.Fatal("expected panic from Register after auto-freeze, got none")
 		}
 	}()
-	d.Register(CommandID(0xCAFE), func(pdu PDU) *DeliverSMResp { return nil })
+	d.Register(CommandID(0xCAFE), func(pdu PDU) PDU { return nil })
 }

@@ -19,6 +19,19 @@ type DecoderFunc func(hdr *Header, body []byte) (PDU, error)
 // Decoder registry is per-instance (not global), allowing registration of
 // vendor-specific or custom PDUs without modifying the codec.
 //
+// Error contract (IMPORTANT):
+//
+//	Decode() errors are NON-FATAL for the transport stream. The PDU was
+//	already fully consumed from the transport (the 4-byte length prefix
+//	determined exactly how many bytes to read). A decode error means the
+//	bytes are malformed (bad C-string, wrong length, unknown encoding)
+//	but the stream position is still correct.
+//
+//	The Reader MUST continue reading after a Decode() error.
+//	Only transport.ReadPDU() errors (EOF, reset, timeout) are fatal.
+//
+//	This contract is part of Codec's responsibility, not Reader's.
+//
 // Concurrency: RegisterDecoder MUST be called before the first Decode/Encode
 // call (i.e., during initialization), NOT concurrently with ongoing operations.
 // Freeze() is called automatically on first Decode/Encode via atomic.Bool.
