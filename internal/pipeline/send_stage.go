@@ -68,14 +68,12 @@ func (s *SendStage) Process(ctx context.Context, state *PipelineState) (*Pipelin
 		return nil, fmt.Errorf("send stage: connector %q returned error: %w", state.Decision.ConnectorID, err)
 	}
 
-	// Defensive copy with deep copy of reference fields.
-	// The shallow struct copy (dr := *domainResult) duplicates the slice header
-	// but not the backing array — RawResponse would still share memory.
-	// We deep-copy RawResponse to fully sever ownership from the sender.
+	// Defensive copy: sender relinquishes ownership of domainResult.
+	// A shallow struct copy suffices because no pipeline stage reads
+	// RawResponse — it is transport-level metadata, not domain data.
+	// Only scalar fields (ExternalID, Parts, ProviderStatus) are mapped
+	// to pipeline.SendResult. RawResponse stays with the sender's copy.
 	dr := *domainResult
-	if dr.RawResponse != nil {
-		dr.RawResponse = append([]byte(nil), dr.RawResponse...)
-	}
 
 	// Map domain.SendResult to pipeline.SendResult.
 	// PipelineState.SendResult is immutable after this point — subsequent
