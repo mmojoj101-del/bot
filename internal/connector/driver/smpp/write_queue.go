@@ -35,6 +35,22 @@ import (
 // capacity. The caller should drop the PDU and move on — never block the Reader.
 var ErrQueueFull = errors.New("write queue: queue is full")
 
+// WriteQueue usage rules (MUST follow throughout the project):
+//
+//	TryEnqueue / TryEnqueueEncoded — ONLY for Reader/Dispatcher handlers.
+//	   These are non-blocking. If the queue is full, drop the PDU.
+//	   Blocking the Reader goroutine is NEVER acceptable.
+//
+//	Enqueue / EnqueueEncoded — ONLY for application goroutines
+//	   (Session.Submit, Session.Bind, Session.Unbind, Heartbeat).
+//	   These CAN block on backpressure. The caller provides a context
+//	   to bound their wait time.
+//
+//	After Stop() — no Enqueue/TryEnqueue should succeed.
+//	   Both return the internal context error immediately.
+//
+// Vioalting these rules WILL block the Reader goroutine and WILL
+
 // WriteQueue is a bounded, goroutine-safe queue of PDUs to send.
 type WriteQueue struct {
 	ch     chan writeItem
