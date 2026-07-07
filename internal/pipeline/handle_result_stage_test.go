@@ -260,15 +260,15 @@ func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
 
 func TestDeliveryOutcome_IsTerminal(t *testing.T) {
 	tests := []struct {
-		status domain.MessageStatus
-		term   bool
-		extraTerm bool // Terminal field value for Sent ambiguity
+		status      domain.MessageStatus
+		awaitingDLR bool
+		term        bool
 	}{
-		{domain.MessageStatusDelivered, true, false},
-		{domain.MessageStatusFailed, true, false},
+		{domain.MessageStatusDelivered, false, true},
+		{domain.MessageStatusFailed, false, true},
 		{domain.MessageStatusRetrying, false, false},
-		{domain.MessageStatusSent, true, true},   // Sent can be terminal
-		{domain.MessageStatusSent, false, false},  // Sent can be non-terminal
+		{domain.MessageStatusSent, false, true},   // terminal (no DLR)
+		{domain.MessageStatusSent, true, false},    // non-terminal (DLR expected)
 		{domain.MessageStatusQueued, false, false},
 		{domain.MessageStatusSending, false, false},
 		{domain.MessageStatusAccepted, false, false},
@@ -276,20 +276,20 @@ func TestDeliveryOutcome_IsTerminal(t *testing.T) {
 
 	for _, tt := range tests {
 		name := string(tt.status)
-		if tt.status == domain.MessageStatusSent && tt.extraTerm {
+		if tt.status == domain.MessageStatusSent && !tt.awaitingDLR {
 			name += "/terminal"
 		}
-		if tt.status == domain.MessageStatusSent && !tt.extraTerm {
+		if tt.status == domain.MessageStatusSent && tt.awaitingDLR {
 			name += "/non-terminal"
 		}
 		t.Run(name, func(t *testing.T) {
 			d := DeliveryOutcome{
-				Status:   tt.status,
-				Terminal: tt.extraTerm, // only affects Sent
+				Status:      tt.status,
+				AwaitingDLR: tt.awaitingDLR,
 			}
 			if got := d.IsTerminal(); got != tt.term {
-				t.Errorf("IsTerminal() for Status=%q Terminal=%v = %v, want %v",
-					tt.status, tt.extraTerm, got, tt.term)
+				t.Errorf("IsTerminal() for Status=%q AwaitingDLR=%v = %v, want %v",
+					tt.status, tt.awaitingDLR, got, tt.term)
 			}
 		})
 	}
@@ -299,7 +299,7 @@ func TestNewDeliveryOutcome(t *testing.T) {
 	d := NewDeliveryOutcome(
 		domain.MessageStatusSent,
 		FailureNone,
-		false,
+		true,
 		"accepted, awaiting delivery receipt",
 	)
 	if d.Status != domain.MessageStatusSent {
@@ -308,8 +308,8 @@ func TestNewDeliveryOutcome(t *testing.T) {
 	if d.FailureKind != FailureNone {
 		t.Errorf("FailureKind = %q, want %q", d.FailureKind, FailureNone)
 	}
-	if d.Terminal != false {
-		t.Errorf("Terminal = %v, want false", d.Terminal)
+	if !d.AwaitingDLR {
+		t.Errorf("AwaitingDLR = %v, want true", d.AwaitingDLR)
 	}
 	if d.Reason != "accepted, awaiting delivery receipt" {
 		t.Errorf("Reason = %q", d.Reason)

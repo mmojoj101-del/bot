@@ -96,6 +96,10 @@ const (
 // Retry scheduling (backoff, jitter) is handled by a separate RetryPolicy/RetryDecorator.
 //
 // Create via NewDeliveryOutcome to ensure field validity.
+//
+// Terminality is derived (not stored) via IsTerminal().
+// The only ambiguous status is Sent: AwaitingDLR=true → non-terminal,
+// AwaitingDLR=false → terminal. All other statuses use domain.IsTerminalStatus.
 type DeliveryOutcome struct {
 	// Status is the canonical message status after handling.
 	Status domain.MessageStatus
@@ -103,32 +107,31 @@ type DeliveryOutcome struct {
 	// FailureKind classifies the cause. Empty = success.
 	FailureKind FailureKind
 
-	// Terminal is true when no further processing is expected on this message.
-	// Most statuses have clear terminality (see IsTerminal). Sent is ambiguous:
-	// it can be terminal (no DLR expected) or non-terminal (DLR pending).
-	// HandleResultStage sets this based on AcceptanceKind.
-	Terminal bool
+	// AwaitingDLR is true only when Status=Sent and DLR is expected.
+	// This is the only case where Sent is non-terminal.
+	AwaitingDLR bool
 
 	// Reason is a human-readable explanation (e.g., "provider returned 500").
 	Reason string
 }
 
 // NewDeliveryOutcome creates a DeliveryOutcome with validated fields.
-func NewDeliveryOutcome(status domain.MessageStatus, failureKind FailureKind, terminal bool, reason string) DeliveryOutcome {
+func NewDeliveryOutcome(status domain.MessageStatus, failureKind FailureKind, awaitingDLR bool, reason string) DeliveryOutcome {
 	return DeliveryOutcome{
 		Status:      status,
 		FailureKind: failureKind,
-		Terminal:    terminal,
+		AwaitingDLR: awaitingDLR,
 		Reason:      reason,
 	}
 }
 
-// IsTerminal returns true if the outcome is final. For most statuses it
-// delegates to domain.IsTerminalStatus. Sent is ambiguous — the Terminal
-// field distinguishes terminal (no DLR) from non-terminal (DLR pending).
+// IsTerminal returns true if the outcome is final.
+// For most statuses it delegates to domain.IsTerminalStatus.
+// Sent is ambiguous — AwaitingDLR distinguishes terminal (no DLR)
+// from non-terminal (DLR expected).
 func (d *DeliveryOutcome) IsTerminal() bool {
 	if d.Status == domain.MessageStatusSent {
-		return d.Terminal
+		return !d.AwaitingDLR
 	}
 	return domain.IsTerminalStatus(d.Status)
 }

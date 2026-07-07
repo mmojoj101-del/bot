@@ -186,6 +186,10 @@ type Sender interface {
 type RetryContext struct {
 	// Attempt is the zero-based retry attempt number (0 = first retry).
 	Attempt int
+
+	// Message is the message being retried. May be nil when the context
+	// is used for generic queries (e.g., minimum delay calculation).
+	Message *Message
 }
 
 // RetryPolicy defines the backoff timing for message retries.
