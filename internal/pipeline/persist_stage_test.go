@@ -117,6 +117,7 @@ func TestPersistStage_Sent(t *testing.T) {
 	}
 	state.DeliveryOutcome = &DeliveryOutcome{
 		Status: domain.MessageStatusSent,
+		SentAt: &now,
 	}
 
 	s := NewPersistStage(repo)
@@ -143,8 +144,9 @@ func TestPersistStage_Sent(t *testing.T) {
 	if repo.updatedInput.Parts == nil || *repo.updatedInput.Parts != 1 {
 		t.Errorf("Parts = %v, want 1", repo.updatedInput.Parts)
 	}
-	if repo.updatedInput.SentAt == nil || repo.updatedInput.SentAt.Before(now) {
-		t.Errorf("SentAt = %v, should be set after now", repo.updatedInput.SentAt)
+	// Timestamps copied directly from DeliveryOutcome
+	if repo.updatedInput.SentAt == nil || !repo.updatedInput.SentAt.Equal(now) {
+		t.Errorf("SentAt = %v, want %v", repo.updatedInput.SentAt, now)
 	}
 }
 
@@ -173,13 +175,11 @@ func TestPersistStage_Sent_NoExternalID(t *testing.T) {
 	if repo.updatedInput.ExternalID != nil {
 		t.Errorf("ExternalID = %v, want nil (no external ID)", *repo.updatedInput.ExternalID)
 	}
-	if repo.updatedInput.SentAt == nil {
-		t.Error("Expected SentAt to be set")
-	}
 }
 
 func TestPersistStage_Delivered(t *testing.T) {
 	repo := &mockMessageRepo{}
+	now := time.Now().UTC()
 
 	msg := &domain.Message{BaseModel: bm("msg-1", 2)}
 	state := NewPipelineState(msg, "trace-1")
@@ -190,7 +190,9 @@ func TestPersistStage_Delivered(t *testing.T) {
 	}
 	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
 	state.DeliveryOutcome = &DeliveryOutcome{
-		Status: domain.MessageStatusDelivered,
+		Status:      domain.MessageStatusDelivered,
+		SentAt:      &now,
+		DeliveredAt: &now,
 	}
 
 	s := NewPersistStage(repo)
@@ -200,15 +202,16 @@ func TestPersistStage_Delivered(t *testing.T) {
 	}
 
 	if repo.updatedInput.DeliveredAt == nil {
-		t.Error("Expected DeliveredAt to be set")
+		t.Error("Expected DeliveredAt to be copied")
 	}
 	if repo.updatedInput.SentAt == nil {
-		t.Error("Expected SentAt to be set for delivered message")
+		t.Error("Expected SentAt to be copied")
 	}
 }
 
 func TestPersistStage_Failed(t *testing.T) {
 	repo := &mockMessageRepo{}
+	now := time.Now().UTC()
 
 	msg := &domain.Message{BaseModel: bm("msg-1", 1)}
 	state := NewPipelineState(msg, "trace-1")
@@ -223,6 +226,8 @@ func TestPersistStage_Failed(t *testing.T) {
 	state.DeliveryOutcome = &DeliveryOutcome{
 		Status:      domain.MessageStatusFailed,
 		FailureKind: FailurePermanent,
+		FailedAt:    &now,
+		SentAt:      &now,
 	}
 
 	s := NewPersistStage(repo)
@@ -232,7 +237,7 @@ func TestPersistStage_Failed(t *testing.T) {
 	}
 
 	if repo.updatedInput.FailedAt == nil {
-		t.Error("Expected FailedAt to be set")
+		t.Error("Expected FailedAt to be copied")
 	}
 	if repo.updatedInput.ErrorCode == nil || *repo.updatedInput.ErrorCode != "400" {
 		t.Errorf("ErrorCode = %v, want 400", repo.updatedInput.ErrorCode)
@@ -242,23 +247,19 @@ func TestPersistStage_Failed(t *testing.T) {
 	}
 }
 
-func TestPersistStage_ExistingTimestampsNotOverwritten(t *testing.T) {
+func TestPersistStage_ExistingTimestampsCopied(t *testing.T) {
 	repo := &mockMessageRepo{}
 	sentAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	deliveredAt := time.Date(2025, 1, 1, 0, 5, 0, 0, time.UTC)
 
-	msg := &domain.Message{
-		BaseModel: bm("msg-1", 5),
-		SentAt:    &sentAt,
-	}
+	msg := &domain.Message{BaseModel: bm("msg-1", 5)}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{
-		Success:    true,
-		ExternalID: "ext-789",
-		Parts:      1,
-	}
+	state.SendResult = &SendResult{Success: true, ExternalID: "ext-789", Parts: 1}
 	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
 	state.DeliveryOutcome = &DeliveryOutcome{
-		Status: domain.MessageStatusDelivered,
+		Status:      domain.MessageStatusDelivered,
+		SentAt:      &sentAt,
+		DeliveredAt: &deliveredAt,
 	}
 
 	s := NewPersistStage(repo)
@@ -267,13 +268,12 @@ func TestPersistStage_ExistingTimestampsNotOverwritten(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// SentAt is always passed now — COALESCE in SQL protects existing values.
-	// We verify DeliveredAt is still set (was nil before update).
-	if repo.updatedInput.SentAt == nil {
-		t.Error("Expected SentAt to be passed (COALESCE handles non-overwrite)")
+	// Both timestamps are copied verbatim from DeliveryOutcome.
+	if repo.updatedInput.SentAt == nil || !repo.updatedInput.SentAt.Equal(sentAt) {
+		t.Errorf("SentAt = %v, want %v", repo.updatedInput.SentAt, sentAt)
 	}
-	if repo.updatedInput.DeliveredAt == nil {
-		t.Error("Expected DeliveredAt to be set (was nil)")
+	if repo.updatedInput.DeliveredAt == nil || !repo.updatedInput.DeliveredAt.Equal(deliveredAt) {
+		t.Errorf("DeliveredAt = %v, want %v", repo.updatedInput.DeliveredAt, deliveredAt)
 	}
 }
 

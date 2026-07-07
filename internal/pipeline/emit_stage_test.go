@@ -9,7 +9,7 @@ import (
 )
 
 type mockPublisher struct {
-	published []events.EventEnvelope
+	published  []events.EventEnvelope
 	publishErr error
 }
 
@@ -39,7 +39,7 @@ func TestEmitStage_PublishesAllEvents(t *testing.T) {
 	s := NewEmitStage(pub)
 
 	state := NewPipelineState(nil, "trace-1")
-	state.PendingEvents = []events.EventEnvelope{
+	state.Events = []events.EventEnvelope{
 		{EventType: events.EventTypeMessageSentV1, TraceID: "trace-1"},
 		{EventType: events.EventTypeMessageDeliveredV1, TraceID: "trace-2"},
 	}
@@ -55,8 +55,8 @@ func TestEmitStage_PublishesAllEvents(t *testing.T) {
 	if pub.published[0].EventType != events.EventTypeMessageSentV1 {
 		t.Errorf("event[0].EventType = %q, want %q", pub.published[0].EventType, events.EventTypeMessageSentV1)
 	}
-	if result.PendingEvents != nil {
-		t.Error("expected PendingEvents to be cleared after publish")
+	if result.Events != nil {
+		t.Error("expected Events to be cleared after publish")
 	}
 }
 
@@ -65,7 +65,7 @@ func TestEmitStage_EmptyEventsNoOp(t *testing.T) {
 	s := NewEmitStage(pub)
 
 	state := NewPipelineState(nil, "trace-1")
-	state.PendingEvents = nil
+	state.Events = nil
 
 	_, err := s.Process(context.Background(), state)
 	if err != nil {
@@ -81,7 +81,7 @@ func TestEmitStage_PublishError(t *testing.T) {
 	s := NewEmitStage(pub)
 
 	state := NewPipelineState(nil, "trace-1")
-	state.PendingEvents = []events.EventEnvelope{
+	state.Events = []events.EventEnvelope{
 		{EventType: events.EventTypeMessageSentV1},
 	}
 

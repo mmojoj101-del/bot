@@ -7,15 +7,15 @@ import (
 	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
 
-// EmitStage publishes PendingEvents from PipelineState.
+// EmitStage publishes Events from PipelineState.
 //
 // It is deliberately "dumb":
-//   - Does NOT create events (HandleResultStage does that)
+//   - Does NOT create events (BuildEventsStage does that)
 //   - Does NOT decide which events to publish
 //   - Does NOT handle retry, metrics, or business logic
-//   - Simply iterates PendingEvents and calls publisher.Publish()
+//   - Simply iterates Events and calls publisher.Publish()
 //
-// Reads:   PipelineState.PendingEvents
+// Reads:   PipelineState.Events
 // Writes:  nothing (side effect: publisher.Publish)
 // Produces: nothing (terminal stage)
 type EmitStage struct {
@@ -34,21 +34,21 @@ func (s *EmitStage) Name() string {
 
 var ErrEmitEmptyPublisher = fmt.Errorf("emit stage: nil publisher")
 
-// Process publishes all PendingEvents in order.
+// Process publishes all Events in order.
 func (s *EmitStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	if s.publisher == nil {
 		return nil, ErrEmitEmptyPublisher
 	}
 
-	for i := range state.PendingEvents {
-		if err := s.publisher.Publish(ctx, state.PendingEvents[i]); err != nil {
+	for i := range state.Events {
+		if err := s.publisher.Publish(ctx, state.Events[i]); err != nil {
 			return nil, fmt.Errorf("emit stage: publish event %q: %w",
-				state.PendingEvents[i].EventType, err)
+				state.Events[i].EventType, err)
 		}
 	}
 
-	// Clear the pending list — events are published.
-	state.PendingEvents = nil
+	// Clear the events list — published events are final.
+	state.Events = nil
 
 	return state, nil
 }

@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"time"
+
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
@@ -11,10 +13,11 @@ import (
 //
 // Artifact chain (each stage → one new artifact, immutable thereafter):
 //
-//	Message ──→ PreparedMessage ──→ RoutingDecision ──→ SendResult ──→ DeliveryOutcome ──→ PendingEvents
-//	  (input)    PrepareStage          RouteStage         SendStage       HandleResultStage    EmitStage
-//	                                                                     ├─ PersistStage (writes state)
-//	                                                                     ├─ EmitStage (publishes events)
+//	Message ──→ PreparedMessage ──→ RoutingDecision ──→ SendResult ──→ DeliveryOutcome ──→ Events
+//	  (input)    PrepareStage          RouteStage         SendStage       HandleResultStage   BuildEventsStage
+//	                                                                     ├─ PersistStage (copies DeliveryOutcome to DB)
+//	                                                                     ├─ BuildEventsStage (builds events from state)
+//	                                                                     ├─ EmitStage (publishes Events)
 //	                                                                     └─ RetryDecorator (schedules retry)
 type PipelineState struct {
 	// Message is the canonical domain message being processed. Immutable in the pipeline.
@@ -33,13 +36,13 @@ type PipelineState struct {
 	SendResult *SendResult
 
 	// DeliveryOutcome is the business interpretation of SendResult
-	// (set by HandleResultStage). PersistStage and EmitStage read it
-	// but never modify it. Retry scheduling is external (RetryPolicy).
+	// (set by HandleResultStage). PersistStage, BuildEventsStage, and
+	// RetryDecorator read it; none modifies it.
 	DeliveryOutcome *DeliveryOutcome
 
-	// PendingEvents is an ordered list of domain events produced by
-	// HandleResultStage. EmitStage publishes them (and nothing else).
-	PendingEvents []events.EventEnvelope
+	// Events is an ordered list of domain events produced by BuildEventsStage.
+	// EmitStage publishes them (and nothing else).
+	Events []events.EventEnvelope
 
 	// TraceID is the cross-lifecycle trace identifier.
 	TraceID string
@@ -48,12 +51,12 @@ type PipelineState struct {
 // RoutingDecision is an immutable value object set once by the Routing Engine.
 // No stage may modify it after creation.
 type RoutingDecision struct {
-	RouteID         string
-	ConnectorID     string
-	StrategyUsed    string   // static, round_robin, failover, weighted
-	Priority        int
-	Cost            int64    // thousandths of a cent, at selection time
-	Reason          string   // why this route was chosen
+	RouteID          string
+	ConnectorID      string
+	StrategyUsed     string   // static, round_robin, failover, weighted
+	Priority         int
+	Cost             int64    // thousandths of a cent, at selection time
+	Reason           string   // why this route was chosen
 	CapabilitiesUsed []string
 }
 
@@ -73,8 +76,8 @@ type SendResult struct {
 	// Acceptance tells the pipeline how to treat the response semantically.
 	// Mapped from domain.SendResult.Acceptance so HandleResultStage doesn't
 	// need to guess DLR semantics — the connector knows best.
-	Acceptance   domain.AcceptanceKind
-	Status       domain.MessageStatus
+	Acceptance domain.AcceptanceKind
+	Status     domain.MessageStatus
 }
 
 // FailureKind classifies the outcome at the business level.
@@ -97,15 +100,19 @@ const (
 )
 
 // DeliveryOutcome is the business interpretation of a SendResult.
-// It is produced by HandleResultStage — pure logic, no DB, no event bus.
-// PersistStage and EmitStage read it; neither modifies it.
-// Retry scheduling (backoff, jitter) is handled by a separate RetryPolicy/RetryDecorator.
+// Produced by HandleResultStage — pure logic, no DB, no event bus.
+// Every subsequent stage reads it; none modifies it.
 //
-// Create via NewDeliveryOutcome to ensure field validity.
+// Timestamps are set by HandleResultStage based on Status semantics:
 //
-// Terminality is derived (not stored) via IsTerminal().
-// The only ambiguous status is Sent: AwaitingDLR=true → non-terminal,
-// AwaitingDLR=false → terminal. All other statuses use domain.IsTerminalStatus.
+//	Sent/Delivered → SentAt = now
+//	Delivered      → DeliveredAt = now
+//	Failed         → FailedAt = now, SentAt = now (retroactive if never sent)
+//
+// PersistStage copies them directly — no timestamp policy in the DB layer.
+//
+// Terminality is derived via IsTerminal().
+// Sent is ambiguous: AwaitingDLR=true → non-terminal, false → terminal.
 type DeliveryOutcome struct {
 	// Status is the canonical message status after handling.
 	Status domain.MessageStatus
@@ -119,10 +126,15 @@ type DeliveryOutcome struct {
 
 	// Reason is a human-readable explanation (e.g., "provider returned 500").
 	Reason string
+
+	// Timestamps — set by HandleResultStage based on status transition.
+	SentAt      *time.Time
+	DeliveredAt *time.Time
+	FailedAt    *time.Time
 }
 
 // NewDeliveryOutcome creates a DeliveryOutcome with validated fields.
-func NewDeliveryOutcome(status domain.MessageStatus, failureKind FailureKind, awaitingDLR bool, reason string) DeliveryOutcome {
+func NewDeliveryOutcome(status domain.MessageStatus, failureKind FailureKind, awaitingDLR bool, reason string, timestamps ...*time.Time) DeliveryOutcome {
 	return DeliveryOutcome{
 		Status:      status,
 		FailureKind: failureKind,

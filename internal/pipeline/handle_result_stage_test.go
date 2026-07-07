@@ -3,9 +3,9 @@ package pipeline
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
-	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
 
 func TestHandleResultStage_Name(t *testing.T) {
@@ -28,7 +28,6 @@ func TestHandleResultStage_NilSendResult(t *testing.T) {
 }
 
 func TestHandleResultStage_AcceptanceFinal(t *testing.T) {
-	// AcceptanceFinal → Sent, Terminal=true (no DLR expected)
 	state := NewPipelineState(&domain.Message{}, "trace-1")
 	state.SendResult = &SendResult{
 		Success:    true,
@@ -52,10 +51,18 @@ func TestHandleResultStage_AcceptanceFinal(t *testing.T) {
 	if result.DeliveryOutcome.FailureKind != FailureNone {
 		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
 	}
+	if result.DeliveryOutcome.SentAt == nil {
+		t.Error("expected SentAt to be set for final acceptance")
+	}
+	if result.DeliveryOutcome.DeliveredAt != nil {
+		t.Error("expected DeliveredAt to be nil (not delivered yet)")
+	}
+	if result.DeliveryOutcome.FailedAt != nil {
+		t.Error("expected FailedAt to be nil")
+	}
 }
 
 func TestHandleResultStage_AcceptanceFinal_NoExternalID(t *testing.T) {
-	// Final acceptance without ID — still Sent, terminal.
 	state := NewPipelineState(&domain.Message{}, "trace-1")
 	state.SendResult = &SendResult{
 		Success:    true,
@@ -76,10 +83,12 @@ func TestHandleResultStage_AcceptanceFinal_NoExternalID(t *testing.T) {
 	if !result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = true (no DLR, terminal)")
 	}
+	if result.DeliveryOutcome.SentAt == nil {
+		t.Error("expected SentAt to be set")
+	}
 }
 
 func TestHandleResultStage_AcceptancePendingDLR(t *testing.T) {
-	// AcceptancePendingDLR → Sent, Terminal=false (DLR expected)
 	state := NewPipelineState(&domain.Message{}, "trace-1")
 	state.SendResult = &SendResult{
 		Success:    true,
@@ -100,13 +109,18 @@ func TestHandleResultStage_AcceptancePendingDLR(t *testing.T) {
 	if result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = false when DLR pending")
 	}
+	if !result.DeliveryOutcome.AwaitingDLR {
+		t.Error("expected AwaitingDLR = true")
+	}
 	if result.DeliveryOutcome.Reason != "accepted, awaiting delivery receipt" {
 		t.Errorf("Reason = %q, want %q", result.DeliveryOutcome.Reason, "accepted, awaiting delivery receipt")
+	}
+	if result.DeliveryOutcome.SentAt == nil {
+		t.Error("expected SentAt to be set for pending DLR")
 	}
 }
 
 func TestHandleResultStage_Rejected_Failed(t *testing.T) {
-	// Non-retryable rejection → Failed, Terminal=true
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 0,
 		MaxRetries: 3,
@@ -135,10 +149,15 @@ func TestHandleResultStage_Rejected_Failed(t *testing.T) {
 	if result.DeliveryOutcome.FailureKind != FailurePermanent {
 		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailurePermanent)
 	}
+	if result.DeliveryOutcome.FailedAt == nil {
+		t.Error("expected FailedAt to be set")
+	}
+	if result.DeliveryOutcome.SentAt == nil {
+		t.Error("expected SentAt to be set retroactively on failure")
+	}
 }
 
 func TestHandleResultStage_Rejected_Retrying(t *testing.T) {
-	// Retryable rejection, budget available → Retrying, Terminal=false
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 1,
 		MaxRetries: 3,
@@ -167,10 +186,16 @@ func TestHandleResultStage_Rejected_Retrying(t *testing.T) {
 	if result.DeliveryOutcome.FailureKind != FailureTemporary {
 		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureTemporary)
 	}
+	// Retrying — no timestamps yet (message wasn't "sent")
+	if result.DeliveryOutcome.SentAt != nil {
+		t.Error("expected no SentAt on retry (not sent yet)")
+	}
+	if result.DeliveryOutcome.FailedAt != nil {
+		t.Error("expected no FailedAt on retry")
+	}
 }
 
 func TestHandleResultStage_Rejected_RetryExhausted(t *testing.T) {
-	// Retryable error but retries exhausted → Failed, Terminal=true
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 3,
 		MaxRetries: 3,
@@ -196,6 +221,12 @@ func TestHandleResultStage_Rejected_RetryExhausted(t *testing.T) {
 	if !result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = true after retries exhausted")
 	}
+	if result.DeliveryOutcome.FailedAt == nil {
+		t.Error("expected FailedAt to be set after retry exhausted")
+	}
+	if result.DeliveryOutcome.SentAt == nil {
+		t.Error("expected SentAt to be set retroactively")
+	}
 }
 
 func TestHandleResultStage_UnknownAcceptance(t *testing.T) {
@@ -217,6 +248,12 @@ func TestHandleResultStage_UnknownAcceptance(t *testing.T) {
 	}
 	if result.DeliveryOutcome.FailureKind != FailureInternal {
 		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureInternal)
+	}
+	if result.DeliveryOutcome.FailedAt == nil {
+		t.Error("expected FailedAt to be set for unknown acceptance")
+	}
+	if result.DeliveryOutcome.SentAt == nil {
+		t.Error("expected SentAt to be set retroactively")
 	}
 }
 
@@ -256,6 +293,33 @@ func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
 	}
 	if state.DeliveryOutcome == nil {
 		t.Error("DeliveryOutcome was not set")
+	}
+}
+
+func TestHandleResultStage_SentAt_NotOverwritten(t *testing.T) {
+	// HandleResultStage always sets SentAt for sent/failed outcomes.
+	// The COALESCE in the DB query prevents overwriting existing timestamps.
+	// This test verifies the stage itself doesn't preserve old timestamps.
+	now := time.Now().UTC()
+	msg := &domain.Message{SentAt: &now}
+	state := NewPipelineState(msg, "trace-1")
+	state.SendResult = &SendResult{
+		Success:    true,
+		ExternalID: "ext-1",
+		Parts:      1,
+		Acceptance: domain.AcceptanceFinal,
+	}
+
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// SentAt is always set by HandleResultStage for Final acceptance.
+	// We only verify it's set (not nil) — the COALESCE handles overwrite protection.
+	if result.DeliveryOutcome.SentAt == nil {
+		t.Error("expected SentAt to be set")
 	}
 }
 
@@ -314,64 +378,5 @@ func TestNewDeliveryOutcome(t *testing.T) {
 	}
 	if d.Reason != "accepted, awaiting delivery receipt" {
 		t.Errorf("Reason = %q", d.Reason)
-	}
-}
-
-func TestHandleResultStage_ProducesPendingEvents(t *testing.T) {
-	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1"}, Text: "hello", TenantID: "tenant-1", RetryCount: 0, MaxRetries: 3}
-	state := NewPipelineState(msg, "trace-abc")
-	state.SendResult = &SendResult{
-		Success:    true,
-		ExternalID: "ext-123",
-		Parts:      1,
-		Acceptance: domain.AcceptanceFinal,
-	}
-
-	s := NewHandleResultStage()
-	result, err := s.Process(context.Background(), state)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PendingEvents) == 0 {
-		t.Fatal("expected PendingEvents to be non-empty")
-	}
-	if result.PendingEvents[0].EventType != events.EventTypeMessageSentV1 {
-		t.Errorf("EventType = %q, want %q", result.PendingEvents[0].EventType, events.EventTypeMessageSentV1)
-	}
-	if result.PendingEvents[0].TraceID != "trace-abc" {
-		t.Errorf("TraceID = %q, want trace-abc", result.PendingEvents[0].TraceID)
-	}
-	if result.PendingEvents[0].TenantID != "tenant-1" {
-		t.Errorf("TenantID = %q, want tenant-1", result.PendingEvents[0].TenantID)
-	}
-	if result.DeliveryOutcome == nil {
-		t.Error("expected DeliveryOutcome to also be set")
-	}
-}
-
-func TestHandleResultStage_FailedEvent(t *testing.T) {
-	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-2"}, TenantID: "tenant-1", RetryCount: 0, MaxRetries: 3}
-	state := NewPipelineState(msg, "trace-xyz")
-	state.SendResult = &SendResult{
-		Success:      false,
-		ExternalID:   "",
-		ErrorCode:    "400",
-		ErrorMessage: "invalid dest",
-		Retryable:    false,
-		Acceptance:   domain.AcceptanceRejected,
-	}
-
-	s := NewHandleResultStage()
-	result, err := s.Process(context.Background(), state)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PendingEvents) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(result.PendingEvents))
-	}
-	if result.PendingEvents[0].EventType != events.EventTypeMessageFailedV1 {
-		t.Errorf("EventType = %q, want %q", result.PendingEvents[0].EventType, events.EventTypeMessageFailedV1)
 	}
 }

@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
@@ -11,14 +10,14 @@ import (
 // PersistStage writes the pipeline results to the database.
 //
 // It is deliberately "dumb" — it reads the finalized artifacts
-// (SendResult + DeliveryOutcome + Decision) and translates them
+// (SendResult + DeliveryOutcome + Decision) and copies their values
 // into a single UPDATE. No business logic, no event publishing,
-// no retry decisions.
+// no retry decisions, no timestamp policy.
 //
 // Reads:   SendResult (transport metadata: ExternalID, Parts, ErrorCode)
-//          DeliveryOutcome (business decision: Status, AwaitingDLR)
+//          DeliveryOutcome (Status, timestamps — copied verbatim)
 //          Decision (ConnectorID, RouteID)
-//          Message (ID, Version, timestamps for first-write detection)
+//          Message (ID, Version)
 // Writes:  MessageRepository.UpdateStatus
 // Produces: nothing (terminal stage)
 type PersistStage struct {
@@ -36,14 +35,15 @@ func (s *PersistStage) Name() string {
 }
 
 var (
-	ErrPersistNoMessage        = fmt.Errorf("persist stage: no message")
-	ErrPersistNoSendResult     = fmt.Errorf("persist stage: no send result")
+	ErrPersistNoMessage         = fmt.Errorf("persist stage: no message")
+	ErrPersistNoSendResult      = fmt.Errorf("persist stage: no send result")
 	ErrPersistNoDeliveryOutcome = fmt.Errorf("persist stage: no delivery outcome")
-	ErrPersistNoDecision       = fmt.Errorf("persist stage: no routing decision")
-	ErrPersistUpdateFailed     = fmt.Errorf("persist stage: update failed")
+	ErrPersistNoDecision        = fmt.Errorf("persist stage: no routing decision")
+	ErrPersistUpdateFailed      = fmt.Errorf("persist stage: update failed")
 )
 
-// Process writes SendResult + DeliveryOutcome to the database.
+// Process writes artifacts to the database.
+// Timestamps are read from DeliveryOutcome — no status-aware logic here.
 func (s *PersistStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	if state.Message == nil {
 		return nil, ErrPersistNoMessage
@@ -63,15 +63,19 @@ func (s *PersistStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 	decision := state.Decision
 	delivery := state.DeliveryOutcome
 
-	now := time.Now().UTC()
-
-	// Build UpdateMessageInput from SendResult + DeliveryOutcome + Decision.
+	// Build UpdateMessageInput — direct copy from state artifacts.
 	status := string(delivery.Status)
 	input := domain.UpdateMessageInput{
 		Status:      (*domain.MessageStatus)(&status),
 		ConnectorID: &decision.ConnectorID,
 		RouteID:     &decision.RouteID,
 		Parts:       &sr.Parts,
+
+		// Timestamps — copied directly from DeliveryOutcome.
+		// HandleResultStage determines when each timestamp should be set.
+		SentAt:      delivery.SentAt,
+		DeliveredAt: delivery.DeliveredAt,
+		FailedAt:    delivery.FailedAt,
 	}
 
 	// ExternalID from provider (SendResult)
@@ -89,23 +93,7 @@ func (s *PersistStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 		input.ErrorMessage = &em
 	}
 
-	// Pass timestamps for the relevant status transitions.
-	// COALESCE in the SQL (sent_at = COALESCE($N, sent_at)) ensures
-	// existing timestamps are preserved — no need to check msg.SentAt here.
-	if delivery.Status == domain.MessageStatusSent || delivery.Status == domain.MessageStatusDelivered {
-		input.SentAt = &now
-	}
-	if delivery.Status == domain.MessageStatusDelivered {
-		input.DeliveredAt = &now
-	}
-	if delivery.Status == domain.MessageStatusFailed {
-		input.FailedAt = &now
-		input.SentAt = &now // retroactive if never sent
-	}
-
 	// Price/Cost from domain result — if available.
-	// These come from the connector's SendResult but aren't mapped
-	// to pipeline.SendResult yet. Use message defaults for now.
 	if msg.Price > 0 {
 		input.Price = &msg.Price
 	}

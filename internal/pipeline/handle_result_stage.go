@@ -2,20 +2,24 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
-	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
 
-// HandleResultStage interprets SendResult and produces two artifacts:
-//   - DeliveryOutcome (business decision)
-//   - PendingEvents (domain events for subscribers)
+// HandleResultStage interprets SendResult and produces DeliveryOutcome.
+// Pure logic — no DB, no event bus, no event building.
 //
-// Both are pure data — no DB, no event bus, no external calls.
-// EmitStage later publishes the PendingEvents.
+// BuildEventsStage later builds domain events from DeliveryOutcome.
+// PersistStage later copies DeliveryOutcome (including timestamps) to the DB.
+//
+// Timestamp policy (pure — no DB read needed):
+//
+//	AcceptanceFinal / AcceptancePendingDLR → SentAt = now
+//	AcceptanceRejected (retryable)         → no timestamps (retrying)
+//	AcceptanceRejected (exhausted)         → FailedAt = now, SentAt = now
+//	AcceptanceRejected (non-retryable)     → FailedAt = now, SentAt = now
 type HandleResultStage struct{}
 
 func NewHandleResultStage() *HandleResultStage {
@@ -28,24 +32,16 @@ func (s *HandleResultStage) Name() string {
 
 var ErrNoSendResult = fmt.Errorf("handle result stage: no send result to interpret")
 
-// Process produces DeliveryOutcome and PendingEvents from SendResult.
-//
-// AcceptanceFinal       → Sent, terminal, event: message.sent.v1
-// AcceptancePendingDLR  → Sent, non-terminal, event: message.sent.v1
-// AcceptanceRejected+   → Retrying, event: message.retrying.v1
-// AcceptanceRejected−   → Failed, event: message.failed.v1
+// Process interprets SendResult via AcceptanceKind and produces DeliveryOutcome.
 func (s *HandleResultStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	if state.SendResult == nil {
 		return nil, ErrNoSendResult
 	}
 
 	sr := state.SendResult
-	msg := state.Message
-	traceID := state.TraceID
 	now := time.Now().UTC()
 
 	var outcome DeliveryOutcome
-	var pendingEvents []events.EventEnvelope
 
 	switch sr.Acceptance {
 	case domain.AcceptanceFinal:
@@ -53,28 +49,29 @@ func (s *HandleResultStage) Process(ctx context.Context, state *PipelineState) (
 			domain.MessageStatusSent, FailureNone, false,
 			fmt.Sprintf("accepted by provider, id=%s", sr.ExternalID),
 		)
-		pendingEvents = append(pendingEvents, sentEvent(msg, sr, traceID, now))
+		outcome.SentAt = &now
 
 	case domain.AcceptancePendingDLR:
 		outcome = NewDeliveryOutcome(
 			domain.MessageStatusSent, FailureNone, true,
 			"accepted, awaiting delivery receipt",
 		)
-		pendingEvents = append(pendingEvents, sentEvent(msg, sr, traceID, now))
+		outcome.SentAt = &now
 
 	case domain.AcceptanceRejected:
-		if sr.Retryable && msg.RetryCount < msg.MaxRetries {
+		if sr.Retryable && state.Message.RetryCount < state.Message.MaxRetries {
 			outcome = NewDeliveryOutcome(
 				domain.MessageStatusRetrying, FailureTemporary, false,
 				fmt.Sprintf("retryable rejection: %s", sr.ErrorCode),
 			)
-			pendingEvents = append(pendingEvents, retryingEvent(msg, sr, traceID, now))
+			// No timestamps — message wasn't sent.
 		} else {
 			outcome = NewDeliveryOutcome(
 				domain.MessageStatusFailed, FailurePermanent, false,
 				fmt.Sprintf("rejected: %s", sr.ErrorCode),
 			)
-			pendingEvents = append(pendingEvents, failedEvent(msg, sr, traceID, now))
+			outcome.FailedAt = &now
+			outcome.SentAt = &now // retroactive if never sent
 		}
 
 	default:
@@ -82,54 +79,10 @@ func (s *HandleResultStage) Process(ctx context.Context, state *PipelineState) (
 			domain.MessageStatusFailed, FailureInternal, false,
 			fmt.Sprintf("unknown acceptance kind: %s", sr.Acceptance),
 		)
-		pendingEvents = append(pendingEvents, failedEvent(msg, sr, traceID, now))
+		outcome.FailedAt = &now
+		outcome.SentAt = &now
 	}
 
 	state.DeliveryOutcome = &outcome
-	state.PendingEvents = pendingEvents
 	return state, nil
-}
-
-// --- event builders (pure, no side effects) ---
-
-func sentEvent(msg *domain.Message, sr *SendResult, traceID string, t time.Time) events.EventEnvelope {
-	payload := events.MessageSentV1Payload{
-		MessageID:   msg.ID,
-		ExternalID:  sr.ExternalID,
-		ConnectorID: "", // set by SendStage from state.Decision — not available here
-		Parts:       sr.Parts,
-	}
-	return makeEvent(events.EventTypeMessageSentV1, msg, traceID, t, payload)
-}
-
-func retryingEvent(msg *domain.Message, sr *SendResult, traceID string, t time.Time) events.EventEnvelope {
-	payload := events.MessageRetryingV1Payload{
-		MessageID: msg.ID,
-		Attempt:   msg.RetryCount + 1,
-	}
-	return makeEvent(events.EventTypeMessageRetryingV1, msg, traceID, t, payload)
-}
-
-func failedEvent(msg *domain.Message, sr *SendResult, traceID string, t time.Time) events.EventEnvelope {
-	payload := events.MessageFailedV1Payload{
-		MessageID:    msg.ID,
-		ExternalID:   sr.ExternalID,
-		ErrorCode:    sr.ErrorCode,
-		ErrorMessage: sr.ErrorMessage,
-		Attempt:      msg.RetryCount + 1,
-		Retryable:    sr.Retryable,
-	}
-	return makeEvent(events.EventTypeMessageFailedV1, msg, traceID, t, payload)
-}
-
-func makeEvent(eventType string, msg *domain.Message, traceID string, t time.Time, payload interface{}) events.EventEnvelope {
-	raw, _ := json.Marshal(payload)
-	return events.EventEnvelope{
-		EventID:    "", // set by publisher if needed
-		EventType:  eventType,
-		OccurredAt: t,
-		TraceID:    traceID,
-		TenantID:   msg.TenantID,
-		Payload:    raw,
-	}
 }
