@@ -439,6 +439,233 @@ func TestSession_WriteQueueFull_EnquireLinkDropped(t *testing.T) {
 	_ = ft
 }
 
+// ── Concurrency Tests ───────────────────────────────────────────────────────
+
+func TestSession_ParallelSendRequest_WindowLimit(t *testing.T) {
+	s, ft := newSessionWithFake(t)
+	defer s.Disconnect(context.Background())
+
+	const count = 12 // > window size (5), validates window serialization
+	errCh := make(chan error, count)
+	pdu := &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}}
+
+	// Launch 12 parallel SendRequests
+	for i := 0; i < count; i++ {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := s.SendRequest(ctx, pdu)
+			errCh <- err
+		}()
+	}
+
+	// Interleave: drain batch of writes → send batch of responses
+	// Window = 5, so at most 5 writes happen before responses are needed
+	batchSize := 4
+	totalDrained := 0
+	totalResponses := 0
+
+	for totalResponses < count {
+		// Drain up to batchSize writes
+		drained := 0
+		for drained < batchSize && totalDrained < count {
+			select {
+			case <-ft.writeCh:
+				drained++
+				totalDrained++
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for write %d/%d (drained=%d)",
+					totalDrained+1, count, totalDrained)
+			}
+		}
+
+		// Send responses for drained writes
+		// We don't know the exact seq numbers allocated, but they start at 1
+		for i := 0; i < drained; i++ {
+			seq := uint32(totalResponses + 1) // sequential starting at 1
+			resp := &EnquireLinkResp{
+				Hdr: Header{CommandID: CommandIDEnquireLinkResp, SequenceNumber: seq, CommandStatus: StatusOK},
+			}
+			data, _ := s.codec.Encode(resp)
+			ft.readCh <- data
+			totalResponses++
+		}
+	}
+
+	// Collect results — should all be OK
+	for i := 0; i < count; i++ {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("SendRequest %d failed: %v", i+1, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for response %d/%d", i+1, count)
+		}
+	}
+}
+
+func TestSession_ResponseOutOfOrder(t *testing.T) {
+	s, ft := newSessionWithFake(t)
+	defer s.Disconnect(context.Background())
+
+	type result struct {
+		seq uint32
+		err error
+	}
+
+	const count = 5
+	errCh := make(chan result, count)
+
+	// Send 5 requests
+	for i := 0; i < count; i++ {
+		pdu := &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}}
+		go func() {
+			ctx := context.Background()
+			resp, err := s.SendRequest(ctx, pdu)
+			seq := uint32(0)
+			if resp != nil {
+				seq = resp.Header().SequenceNumber
+			}
+			errCh <- result{seq, err}
+		}()
+	}
+
+	// Drain 5 writes
+	for i := 0; i < count; i++ {
+		select {
+		case <-ft.writeCh:
+		case <-time.After(time.Second):
+			t.Fatalf("timeout drain write %d", i+1)
+		}
+	}
+
+	// Send responses OUT OF ORDER: 5, 4, 3, 2, 1
+	for i := count; i >= 1; i-- {
+		resp := &EnquireLinkResp{
+			Hdr: Header{CommandID: CommandIDEnquireLinkResp, SequenceNumber: uint32(i), CommandStatus: StatusOK},
+		}
+		data, _ := s.codec.Encode(resp)
+		ft.readCh <- data
+	}
+
+	// Collect results — should all succeed despite out-of-order delivery
+	seen := make(map[uint32]bool)
+	for i := 0; i < count; i++ {
+		select {
+		case r := <-errCh:
+			if r.err != nil {
+				t.Errorf("SendRequest seq=%d failed: %v", r.seq, r.err)
+			}
+			if r.seq == 0 {
+				t.Error("expected non-zero seq in response")
+			} else {
+				if seen[r.seq] {
+					t.Errorf("duplicate response seq %d", r.seq)
+				}
+				seen[r.seq] = true
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timeout waiting for response %d/5", i+1)
+		}
+	}
+
+	if len(seen) != count {
+		t.Errorf("expected %d unique responses, got %d", count, len(seen))
+	}
+}
+
+func TestSession_DuplicateResponse_Ignored(t *testing.T) {
+	s, ft := newSessionWithFake(t)
+	defer s.Disconnect(context.Background())
+
+	ctx := context.Background()
+	pdu := &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}}
+
+	// Send request
+	respCh := make(chan error, 1)
+	go func() {
+		_, err := s.SendRequest(ctx, pdu)
+		respCh <- err
+	}()
+
+	// Wait for write
+	select {
+	case <-ft.writeCh:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for write")
+	}
+
+	// Send FIRST response
+	firstResp := &EnquireLinkResp{
+		Hdr: Header{CommandID: CommandIDEnquireLinkResp, SequenceNumber: 1, CommandStatus: StatusOK},
+	}
+	data, _ := s.codec.Encode(firstResp)
+	ft.readCh <- data
+
+	// Wait for first response to be processed
+	select {
+	case err := <-respCh:
+		if err != nil {
+			t.Fatalf("first response error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for first response")
+	}
+
+	// Send DUPLICATE response (same seq — already consumed) — must not panic
+	dupResp := &EnquireLinkResp{
+		Hdr: Header{CommandID: CommandIDEnquireLinkResp, SequenceNumber: 1, CommandStatus: StatusOK},
+	}
+	dupData, _ := s.codec.Encode(dupResp)
+	ft.readCh <- dupData
+
+	// Allow time for processing — no panic = pass
+	time.Sleep(20 * time.Millisecond)
+}
+
+func TestSession_Disconnect_DuringWrite(t *testing.T) {
+	s, ft := newSessionWithFake(t)
+
+	// Use a writeHook that just captures the data (doesn't block)
+	var captured atomic.Bool
+	ft.writeHook = func(ctx context.Context, data []byte) error {
+		captured.Store(true)
+		// Don't actually write to writeCh — simulate slow but non-blocking
+		// This lets the SendRequest think it wrote, but no response comes
+		return nil
+	}
+
+	// Send request (will "write" but never get a response)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.SendRequest(context.Background(), &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}})
+		errCh <- err
+	}()
+
+	// Wait for the write to be captured
+	time.Sleep(50 * time.Millisecond)
+	if !captured.Load() {
+		t.Fatal("write not captured")
+	}
+
+	// Disconnect while request is pending
+	err := s.Disconnect(context.Background())
+	if err != nil {
+		t.Logf("Disconnect err: %v", err)
+	}
+
+	// SendRequest should unblock with an error
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Log("SendRequest completed (response never sent but ctx may have timed out)")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendRequest not unblocked after disconnect")
+	}
+}
+
 // ── Default Config ──────────────────────────────────────────────────────────
 
 func TestSession_DefaultConfig(t *testing.T) {

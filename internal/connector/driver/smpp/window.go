@@ -37,10 +37,18 @@ func (s *WindowSlot) Sequence() uint32 { return s.seq }
 
 // Write encodes the PDU, registers the pending request, and writes to transport.
 // If Write fails, the slot is released automatically (seq + pending cleaned up).
+//
+// Write sets the sequence number and command ID on the PDU before encoding,
+// using the values allocated by WindowManager.Acquire. The caller does NOT
+// need to set Header().SequenceNumber — WindowManager owns it.
 func (s *WindowSlot) Write(tx SMPPTransport, pdu PDU) error {
 	if s.written {
 		return fmt.Errorf("window slot %d: already written", s.seq)
 	}
+
+	// Set the sequence number on the PDU — WindowManager owns it
+	pdu.Header().SequenceNumber = s.seq
+	s.cmdID = pdu.Header().CommandID
 
 	s.window.codecMu.RLock()
 	data, err := s.window.codec.Encode(pdu)
