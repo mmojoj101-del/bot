@@ -180,14 +180,21 @@ type Sender interface {
 	Send(ctx context.Context, req SendRequest) (*SendResult, error)
 }
 
+// RetryContext carries the context for a retry decision.
+// Using a struct (not bare parameters) provides forward compatibility
+// without breaking implementations when new fields are added.
+type RetryContext struct {
+	// Attempt is the zero-based retry attempt number (0 = first retry).
+	Attempt int
+}
+
 // RetryPolicy defines the backoff timing for message retries.
 // The pipeline handles the retry budget check (MaxRetries on Message)
 // and calls NextDelay only when a retry is actually needed.
 // Implementation MUST be safe for concurrent use.
 type RetryPolicy interface {
-	// NextDelay returns the backoff duration for the given attempt number.
-	// attempt is zero-based (0 = first retry after initial failure).
-	NextDelay(attempt int) time.Duration
+	// NextDelay returns the backoff duration for the given retry context.
+	NextDelay(ctx RetryContext) time.Duration
 }
 
 // DLRMapper maps provider-specific delivery status to the internal DLRStatus.

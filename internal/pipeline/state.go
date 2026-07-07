@@ -94,6 +94,8 @@ const (
 // It is produced by HandleResultStage — pure logic, no DB, no event bus.
 // PersistStage and EmitStage read it; neither modifies it.
 // Retry scheduling (backoff, jitter) is handled by a separate RetryPolicy/RetryDecorator.
+//
+// Create via NewDeliveryOutcome to ensure field validity.
 type DeliveryOutcome struct {
 	// Status is the canonical message status after handling.
 	Status domain.MessageStatus
@@ -101,14 +103,33 @@ type DeliveryOutcome struct {
 	// FailureKind classifies the cause. Empty = success.
 	FailureKind FailureKind
 
+	// Terminal is true when no further processing is expected on this message.
+	// Most statuses have clear terminality (see IsTerminal). Sent is ambiguous:
+	// it can be terminal (no DLR expected) or non-terminal (DLR pending).
+	// HandleResultStage sets this based on AcceptanceKind.
+	Terminal bool
+
 	// Reason is a human-readable explanation (e.g., "provider returned 500").
 	Reason string
 }
 
-// IsTerminal returns true if the outcome is final and no further processing
-// should occur. Delegates to domain.IsTerminalStatus — adding new terminal
-// statuses only requires changing that one function, not this method.
+// NewDeliveryOutcome creates a DeliveryOutcome with validated fields.
+func NewDeliveryOutcome(status domain.MessageStatus, failureKind FailureKind, terminal bool, reason string) DeliveryOutcome {
+	return DeliveryOutcome{
+		Status:      status,
+		FailureKind: failureKind,
+		Terminal:    terminal,
+		Reason:      reason,
+	}
+}
+
+// IsTerminal returns true if the outcome is final. For most statuses it
+// delegates to domain.IsTerminalStatus. Sent is ambiguous — the Terminal
+// field distinguishes terminal (no DLR) from non-terminal (DLR pending).
 func (d *DeliveryOutcome) IsTerminal() bool {
+	if d.Status == domain.MessageStatusSent {
+		return d.Terminal
+	}
 	return domain.IsTerminalStatus(d.Status)
 }
 

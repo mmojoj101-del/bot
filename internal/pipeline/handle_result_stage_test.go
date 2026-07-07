@@ -27,6 +27,7 @@ func TestHandleResultStage_NilSendResult(t *testing.T) {
 }
 
 func TestHandleResultStage_AcceptanceFinal(t *testing.T) {
+	// AcceptanceFinal → Sent, Terminal=true (no DLR expected)
 	state := NewPipelineState(&domain.Message{}, "trace-1")
 	state.SendResult = &SendResult{
 		Success:    true,
@@ -41,18 +42,43 @@ func TestHandleResultStage_AcceptanceFinal(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if result.DeliveryOutcome.Status != domain.MessageStatusDelivered {
-		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusDelivered)
+	if result.DeliveryOutcome.Status != domain.MessageStatusSent {
+		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusSent)
 	}
 	if !result.DeliveryOutcome.IsTerminal() {
-		t.Error("expected IsTerminal() = true for Delivered")
+		t.Error("expected IsTerminal() = true for AcceptanceFinal (no DLR)")
 	}
 	if result.DeliveryOutcome.FailureKind != FailureNone {
 		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
 	}
 }
 
+func TestHandleResultStage_AcceptanceFinal_NoExternalID(t *testing.T) {
+	// Final acceptance without ID — still Sent, terminal.
+	state := NewPipelineState(&domain.Message{}, "trace-1")
+	state.SendResult = &SendResult{
+		Success:    true,
+		ExternalID: "",
+		Parts:      1,
+		Acceptance: domain.AcceptanceFinal,
+	}
+
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.DeliveryOutcome.Status != domain.MessageStatusSent {
+		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusSent)
+	}
+	if !result.DeliveryOutcome.IsTerminal() {
+		t.Error("expected IsTerminal() = true (no DLR, terminal)")
+	}
+}
+
 func TestHandleResultStage_AcceptancePendingDLR(t *testing.T) {
+	// AcceptancePendingDLR → Sent, Terminal=false (DLR expected)
 	state := NewPipelineState(&domain.Message{}, "trace-1")
 	state.SendResult = &SendResult{
 		Success:    true,
@@ -78,32 +104,8 @@ func TestHandleResultStage_AcceptancePendingDLR(t *testing.T) {
 	}
 }
 
-func TestHandleResultStage_AcceptanceFinal_NoExternalID(t *testing.T) {
-	// Final acceptance without ID — uncommon but valid (e.g., provider accepts silently).
-	state := NewPipelineState(&domain.Message{}, "trace-1")
-	state.SendResult = &SendResult{
-		Success:    true,
-		ExternalID: "",
-		Parts:      1,
-		Acceptance: domain.AcceptanceFinal,
-	}
-
-	s := NewHandleResultStage()
-	result, err := s.Process(context.Background(), state)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.DeliveryOutcome.Status != domain.MessageStatusDelivered {
-		t.Errorf("Status = %q, want %q", result.DeliveryOutcome.Status, domain.MessageStatusDelivered)
-	}
-	if result.DeliveryOutcome.FailureKind != FailureNone {
-		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
-	}
-}
-
 func TestHandleResultStage_Rejected_Failed(t *testing.T) {
-	// Non-retryable rejection.
+	// Non-retryable rejection → Failed, Terminal=true
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 0,
 		MaxRetries: 3,
@@ -135,7 +137,7 @@ func TestHandleResultStage_Rejected_Failed(t *testing.T) {
 }
 
 func TestHandleResultStage_Rejected_Retrying(t *testing.T) {
-	// Retryable rejection, budget available.
+	// Retryable rejection, budget available → Retrying, Terminal=false
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 1,
 		MaxRetries: 3,
@@ -167,7 +169,7 @@ func TestHandleResultStage_Rejected_Retrying(t *testing.T) {
 }
 
 func TestHandleResultStage_Rejected_RetryExhausted(t *testing.T) {
-	// Retryable error but retries exhausted.
+	// Retryable error but retries exhausted → Failed, Terminal=true
 	state := NewPipelineState(&domain.Message{
 		RetryCount: 3,
 		MaxRetries: 3,
@@ -260,22 +262,56 @@ func TestDeliveryOutcome_IsTerminal(t *testing.T) {
 	tests := []struct {
 		status domain.MessageStatus
 		term   bool
+		extraTerm bool // Terminal field value for Sent ambiguity
 	}{
-		{domain.MessageStatusDelivered, true},
-		{domain.MessageStatusFailed, true},
-		{domain.MessageStatusRetrying, false},
-		{domain.MessageStatusSent, false},
-		{domain.MessageStatusQueued, false},
-		{domain.MessageStatusSending, false},
-		{domain.MessageStatusAccepted, false},
+		{domain.MessageStatusDelivered, true, false},
+		{domain.MessageStatusFailed, true, false},
+		{domain.MessageStatusRetrying, false, false},
+		{domain.MessageStatusSent, true, true},   // Sent can be terminal
+		{domain.MessageStatusSent, false, false},  // Sent can be non-terminal
+		{domain.MessageStatusQueued, false, false},
+		{domain.MessageStatusSending, false, false},
+		{domain.MessageStatusAccepted, false, false},
 	}
 
 	for _, tt := range tests {
-		t.Run(string(tt.status), func(t *testing.T) {
-			d := DeliveryOutcome{Status: tt.status}
+		name := string(tt.status)
+		if tt.status == domain.MessageStatusSent && tt.extraTerm {
+			name += "/terminal"
+		}
+		if tt.status == domain.MessageStatusSent && !tt.extraTerm {
+			name += "/non-terminal"
+		}
+		t.Run(name, func(t *testing.T) {
+			d := DeliveryOutcome{
+				Status:   tt.status,
+				Terminal: tt.extraTerm, // only affects Sent
+			}
 			if got := d.IsTerminal(); got != tt.term {
-				t.Errorf("IsTerminal() for Status=%q = %v, want %v", tt.status, got, tt.term)
+				t.Errorf("IsTerminal() for Status=%q Terminal=%v = %v, want %v",
+					tt.status, tt.extraTerm, got, tt.term)
 			}
 		})
+	}
+}
+
+func TestNewDeliveryOutcome(t *testing.T) {
+	d := NewDeliveryOutcome(
+		domain.MessageStatusSent,
+		FailureNone,
+		false,
+		"accepted, awaiting delivery receipt",
+	)
+	if d.Status != domain.MessageStatusSent {
+		t.Errorf("Status = %q, want %q", d.Status, domain.MessageStatusSent)
+	}
+	if d.FailureKind != FailureNone {
+		t.Errorf("FailureKind = %q, want %q", d.FailureKind, FailureNone)
+	}
+	if d.Terminal != false {
+		t.Errorf("Terminal = %v, want false", d.Terminal)
+	}
+	if d.Reason != "accepted, awaiting delivery receipt" {
+		t.Errorf("Reason = %q", d.Reason)
 	}
 }

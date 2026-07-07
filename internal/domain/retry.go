@@ -25,9 +25,10 @@ func NewExponentialBackoff() *ExponentialBackoff {
 	}
 }
 
-// NextDelay returns the backoff duration for the given attempt.
-// Caps at MaxDelay (default 5 minutes).
-func (e *ExponentialBackoff) NextDelay(attempt int) time.Duration {
+// NextDelay returns the backoff duration for the given retry context.
+// Formula: min(initial * multiplier^attempt, maxDelay)
+func (e *ExponentialBackoff) NextDelay(ctx RetryContext) time.Duration {
+	attempt := ctx.Attempt
 	if attempt < 0 {
 		attempt = 0
 	}
@@ -39,11 +40,11 @@ func (e *ExponentialBackoff) NextDelay(attempt int) time.Duration {
 	return time.Duration(delay)
 }
 
-// NoRetry is a RetryPolicy that never retries — always returns 0 delay.
+// NoRetry is a RetryPolicy that never retries — always returns 0.
 type NoRetry struct{}
 
-// NextDelay returns 0 — no retry delay.
-func (NoRetry) NextDelay(_ int) time.Duration { return 0 }
+// NextDelay returns 0.
+func (NoRetry) NextDelay(_ RetryContext) time.Duration { return 0 }
 
 // compile-time interface checks
 var _ RetryPolicy = (*ExponentialBackoff)(nil)

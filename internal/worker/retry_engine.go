@@ -30,7 +30,8 @@ func NewDefaultRetryPolicy() *DefaultRetryPolicy {
 
 func (p *DefaultRetryPolicy) MaxRetries() int { return p.maxRetries }
 
-func (p *DefaultRetryPolicy) NextDelay(attempt int) time.Duration {
+func (p *DefaultRetryPolicy) NextDelay(ctx domain.RetryContext) time.Duration {
+	attempt := ctx.Attempt
 	if attempt <= 1 {
 		return p.baseDelay
 	}
@@ -255,7 +256,7 @@ func (e *RetryEngine) processRetries() {
 	defer cancel()
 
 	now := time.Now().UTC()
-	minDelay := e.retryPolicy.NextDelay(1)
+	minDelay := e.retryPolicy.NextDelay(domain.RetryContext{Attempt: 1})
 
 	messages, err := e.queueRepo.GetRetryable(ctx, now, minDelay, e.batchSize)
 	if err != nil {
@@ -276,7 +277,7 @@ func (e *RetryEngine) processRetries() {
 			return
 		default:
 		}
-		requiredDelay := e.retryPolicy.NextDelay(msg.RetryCount + 1)
+		requiredDelay := e.retryPolicy.NextDelay(domain.RetryContext{Attempt: msg.RetryCount + 1})
 		if msg.UpdatedAt.Add(requiredDelay).After(now) {
 			continue
 		}
