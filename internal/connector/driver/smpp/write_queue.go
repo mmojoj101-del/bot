@@ -2,6 +2,7 @@ package smpp
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -16,13 +17,30 @@ import (
 //   - Reader blocking on transport writes (Reader must only read).
 //   - Callers blocking on flow control (the queue absorbs bursts).
 //   - Concurrent WritePDU calls from multiple goroutines (queue serializes).
+//
+// Backpressure policy:
+//
+//	Enqueue(ctx, pdu)  — blocking: waits until the PDU is queued or ctx is
+//	                     cancelled. Use for application goroutines (SubmitSM)
+//	                     that can tolerate backpressure. The context allows
+//	                     the caller to bound their wait time.
+//
+//	TryEnqueue(pdu)    — non-blocking: returns ErrQueueFull immediately if
+//	                     the queue is full. Use for Reader/Dispatcher handlers
+//	                     (DeliverSMResp, EnquireLinkResp) that MUST NOT block
+//	                     the Reader goroutine. If the queue is full, the
+//	                     response is dropped — the SMSC will retry or time out.
+
+// ErrQueueFull is returned by TryEnqueue when the write queue has reached its
+// capacity. The caller should drop the PDU and move on — never block the Reader.
+var ErrQueueFull = errors.New("write queue: queue is full")
 
 // WriteQueue is a bounded, goroutine-safe queue of PDUs to send.
 type WriteQueue struct {
-	ch    chan writeItem
-	ctx   context.Context
+	ch     chan writeItem
+	ctx    context.Context
 	cancel context.CancelFunc
-	wg    sync.WaitGroup
+	wg     sync.WaitGroup
 }
 
 type writeItem struct {
@@ -32,7 +50,8 @@ type writeItem struct {
 }
 
 // NewWriteQueue creates a write queue with the given buffer size.
-// bufSize: number of PDUs that can be queued before backpressure.
+// bufSize: how many PDUs can be queued before backpressure kicks in.
+// A good starting value is window_size * 2 or 10-100 for most SMPP setups.
 func NewWriteQueue(bufSize int) *WriteQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WriteQueue{
@@ -42,32 +61,67 @@ func NewWriteQueue(bufSize int) *WriteQueue {
 	}
 }
 
-// Enqueue adds a PDU to the send queue.
-// Non-blocking if the queue has room; blocks if the queue is full.
-// Returns an error if the queue is closed.
-func (wq *WriteQueue) Enqueue(pdu PDU) error {
+// Enqueue adds a PDU to the send queue, blocking if the queue is full.
+//
+// Blocking behavior:
+//   - If the queue has room: returns immediately.
+//   - If the queue is full: blocks until a slot frees up or ctx is cancelled.
+//   - If the queue's internal context is cancelled (Stop called): returns
+//     the internal context error immediately.
+//
+// Use for application goroutines (SubmitSM, BindTransceiver) where
+// blocking on backpressure is acceptable and expected.
+func (wq *WriteQueue) Enqueue(ctx context.Context, pdu PDU) error {
 	select {
 	case wq.ch <- writeItem{pdu: pdu}:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-wq.ctx.Done():
 		return wq.ctx.Err()
 	}
 }
 
-// EnqueueEncoded adds a pre-encoded PDU to the send queue.
+// TryEnqueue adds a PDU to the send queue without blocking.
+// Returns ErrQueueFull immediately if the queue is at capacity.
+//
+// Use for Reader/Dispatcher handler paths where blocking is NOT allowed.
+// The caller (handler) must drop the PDU on ErrQueueFull and continue.
+func (wq *WriteQueue) TryEnqueue(pdu PDU) error {
+	select {
+	case wq.ch <- writeItem{pdu: pdu}:
+		return nil
+	default:
+		return ErrQueueFull
+	}
+}
+
+// EnqueueEncoded adds a pre-encoded PDU to the send queue, blocking if full.
 // Useful for responses that were already encoded during dispatch.
-func (wq *WriteQueue) EnqueueEncoded(hdr Header, data []byte) error {
+func (wq *WriteQueue) EnqueueEncoded(ctx context.Context, hdr Header, data []byte) error {
 	select {
 	case wq.ch <- writeItem{hdr: hdr, encoded: data}:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-wq.ctx.Done():
 		return wq.ctx.Err()
 	}
 }
 
-// Start begins draining the queue in a goroutine.
+// TryEnqueueEncoded adds a pre-encoded PDU without blocking.
+func (wq *WriteQueue) TryEnqueueEncoded(hdr Header, data []byte) error {
+	select {
+	case wq.ch <- writeItem{hdr: hdr, encoded: data}:
+		return nil
+	default:
+		return ErrQueueFull
+	}
+}
+
+// Start begins draining the queue in a background goroutine.
 // For each queued PDU, it encodes (if not already) and writes to the transport.
-// Exits when the queue context is cancelled.
+// Exits when the queue context is cancelled (via Stop()).
 func (wq *WriteQueue) Start(transport SMPPTransport, codec *Codec) {
 	wq.wg.Add(1)
 	go func() {
@@ -90,7 +144,6 @@ func (wq *WriteQueue) Start(transport SMPPTransport, codec *Codec) {
 				} else {
 					continue
 				}
-				// Write to transport (context from queue owns the lifecycle)
 				_ = transport.WritePDU(wq.ctx, data)
 			case <-wq.ctx.Done():
 				return
@@ -100,6 +153,7 @@ func (wq *WriteQueue) Start(transport SMPPTransport, codec *Codec) {
 }
 
 // Stop cancels the queue context and waits for the writer goroutine to exit.
+// After Stop, Enqueue/TryEnqueue return the internal context error.
 func (wq *WriteQueue) Stop() {
 	wq.cancel()
 	wq.wg.Wait()

@@ -11,6 +11,15 @@ import "sync/atomic"
 //   - Upon reaching 0x7FFFFFFF, the counter wraps to 1 (not 0).
 //   - The ESME and SMSC each maintain their own independent sequence counter.
 //
+// Sequence number uniqueness scope:
+//   - A seq number is unique only while the corresponding request is outstanding
+//     (registered in PendingStore). Once the response is received and the pending
+//     entry is removed, the seq number MAY be reused after a full wrap of the
+//     2^31 range. In practice, with a window size of 1-100, reuse before the
+//     SMSC responds is impossible.
+//   - This manager does NOT check PendingStore for collisions. The WindowManager
+//     MAY do so as an extra safety check (it currently does, in Acquire).
+//
 // This implementation:
 //   - Starts at 1 and increments atomically.
 //   - Wraps to 1 (not 0) when exceeding 0x7FFFFFFF.

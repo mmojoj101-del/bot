@@ -108,9 +108,16 @@ type Dispatcher struct {
 
 // NewDispatcher creates a Dispatcher with the given handlers.
 // All handlers are optional — nil handlers silently ignore the PDU.
-// All standard dispatch entries are pre-registered. To add vendor-specific
-// or custom PDU handlers, use Register() AFTER NewDispatcher returns but
-// BEFORE the first Dispatch() call.
+// All standard dispatch entries are pre-registered (built-in).
+//
+// Registration lifecycle:
+//  1. NewDispatcher() registers built-in handlers (not yet frozen).
+//  2. Register() adds vendor/custom PDUs during initialization.
+//  3. First Dispatch() auto-freezes — all Register() calls must
+//     complete before the first Dispatch().
+//
+// The concurrent go Dispatch() + go Register() pattern is a
+// programming error — not supported, not protected against.
 func NewDispatcher(
 	pendingResp PendingResponseHandler,
 	deliverSM DeliverSMHandler,
@@ -139,6 +146,10 @@ func NewDispatcher(
 	d.table[CommandIDUnbindResp] = d.dispatchPendingResponse
 	d.table[CommandIDGenericNack] = d.dispatchGenericNack
 
+	// NOT frozen here — Register() can still be called for vendor PDUs.
+	// Auto-freeze on first Dispatch() is the safety net.
+	// All Register() calls MUST complete before any Dispatch().
+
 	return d
 }
 
@@ -146,8 +157,9 @@ func NewDispatcher(
 // Enables plugin-based dispatch: vendor PDUs or SMPP 5.0 extensions
 // can be registered without modifying this package.
 //
-// MUST be called before the first Dispatch() call (initialization-only).
-// Panics if the dispatcher is frozen (auto-frozen on first Dispatch).
+// MUST be called BEFORE the first Dispatch() call (initialization-only).
+// Panics if the dispatcher is frozen (frozen on NewDispatcher return,
+// plus auto-frozen on first Dispatch as a safety net).
 func (d *Dispatcher) Register(cmd CommandID, fn DispatchFunc) {
 	if d.frozen.Load() {
 		panic("smpp: dispatcher is frozen — cannot register after first use")
@@ -156,8 +168,8 @@ func (d *Dispatcher) Register(cmd CommandID, fn DispatchFunc) {
 }
 
 // Freeze makes the dispatch table immutable.
-// Call after all registrations are complete, before concurrent usage.
-// Automatically called on first Dispatch() call as a safety net.
+// Already called by NewDispatcher(). Only needed if you temporarily
+// unfroze (you shouldn't) or want to be explicit.
 func (d *Dispatcher) Freeze() {
 	d.frozen.Store(true)
 }
@@ -165,7 +177,8 @@ func (d *Dispatcher) Freeze() {
 // Dispatch routes a decoded PDU to the appropriate handler.
 //
 // Routing is O(1) map lookup by CommandID (not a switch statement).
-// The dispatcher is frozen on first use (safety net — no further registration).
+// Auto-freezes on first use as a safety net — all Register() calls
+// must complete before the first Dispatch().
 // Unknown CommandIDs are logged via OnError and silently dropped.
 //
 // Dispatch is non-blocking if all registered handlers are non-blocking.
