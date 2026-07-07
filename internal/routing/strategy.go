@@ -2,10 +2,24 @@ package routing
 
 import (
 	"fmt"
+	"math/rand"
 	"sync/atomic"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
 )
+
+// Random abstracts random number generation for weighted selection.
+// Production uses math/rand; tests use deterministic mock.
+type Random interface {
+	Intn(n int) int
+}
+
+// defaultRandom wraps math/rand for production.
+type defaultRandom struct{}
+
+func (r *defaultRandom) Intn(n int) int {
+	return rand.Intn(n)
+}
 
 // Selector picks one route from a list of candidates.
 // Different implementations implement different strategies.
@@ -58,8 +72,7 @@ func (s *RoundRobinSelector) Select(routes []domain.Route) (*domain.Route, error
 
 // --- FailoverSelector ---
 
-// FailoverSelector picks routes by priority order, skipping unhealthy.
-// It works with health-check information provided by the caller.
+// FailoverSelector picks routes by priority order.
 type FailoverSelector struct{}
 
 func NewFailoverSelector() *FailoverSelector {
@@ -69,20 +82,25 @@ func NewFailoverSelector() *FailoverSelector {
 func (s *FailoverSelector) Name() string { return "failover" }
 
 func (s *FailoverSelector) Select(routes []domain.Route) (*domain.Route, error) {
-	for i := range routes {
-		return &routes[i], nil
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("failover selector: no routes available")
 	}
-	return nil, fmt.Errorf("failover selector: no routes available")
+	return &routes[0], nil
 }
 
 // --- WeightedSelector ---
 
 // WeightedSelector selects routes based on their Weight field.
 // Higher weight = higher probability.
-type WeightedSelector struct{}
+type WeightedSelector struct {
+	random Random
+}
 
-func NewWeightedSelector() *WeightedSelector {
-	return &WeightedSelector{}
+func NewWeightedSelector(random Random) *WeightedSelector {
+	if random == nil {
+		random = &defaultRandom{}
+	}
+	return &WeightedSelector{random: random}
 }
 
 func (s *WeightedSelector) Name() string { return "weighted" }
@@ -104,8 +122,7 @@ func (s *WeightedSelector) Select(routes []domain.Route) (*domain.Route, error) 
 	}
 
 	// Pick based on weight distribution.
-	// Each call uses a simple counter-based distribution for determinism.
-	pick := nextWeighted(totalWeight)
+	pick := s.random.Intn(totalWeight)
 	accumulated := 0
 	for _, r := range routes {
 		if r.Weight <= 0 {
@@ -120,16 +137,8 @@ func (s *WeightedSelector) Select(routes []domain.Route) (*domain.Route, error) 
 	return &routes[0], nil
 }
 
-// weightedCounter is a global sequence counter for weighted selection.
-var weightedCounter atomic.Uint64
-
-// nextWeighted returns a value in [0, totalWeight) based on a sequence counter.
-// This ensures deterministic but distributed picks.
-func nextWeighted(totalWeight int) int {
-	return int(weightedCounter.Add(1) % uint64(totalWeight))
-}
-
 // SelectorForStrategy returns the appropriate Selector for a given strategy.
+// WeightedSelector uses the default random source (math/rand).
 func SelectorForStrategy(strategy domain.RouteStrategy) (Selector, error) {
 	switch strategy {
 	case domain.RouteStrategyStatic:
@@ -139,7 +148,7 @@ func SelectorForStrategy(strategy domain.RouteStrategy) (Selector, error) {
 	case domain.RouteStrategyFailover:
 		return NewFailoverSelector(), nil
 	case domain.RouteStrategyWeighted:
-		return NewWeightedSelector(), nil
+		return NewWeightedSelector(nil), nil // nil = default random
 	default:
 		return nil, fmt.Errorf("unknown route strategy: %q", strategy)
 	}

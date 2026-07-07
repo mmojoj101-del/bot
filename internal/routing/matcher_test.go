@@ -12,6 +12,7 @@ func route(id, prefix, connectorID string, priority int, enabled bool) domain.Ro
 		Type:        domain.RouteTypeSMS,
 		Prefix:      prefix,
 		ConnectorID: connectorID,
+		Strategy:    domain.RouteStrategyStatic,
 		Priority:    priority,
 		Enabled:     enabled,
 	}

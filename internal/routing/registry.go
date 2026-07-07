@@ -14,10 +14,9 @@ type ConnectorHealthCheck interface {
 	CheckHealth(ctx context.Context) error
 }
 
-// ConnectorHealthChecker is how the routing engine accesses connectors
-// for health checking. It mirrors connector.ConnectorRegistry's Get method
-// but the routing engine only uses it for health queries.
-type ConnectorHealthChecker interface {
+// ConnectorResolver is how the routing engine looks up connectors
+// for health checking. It follows Interface Segregation: only Get()
+// is needed — List() lives only in connector.ConnectorRegistry.
+type ConnectorResolver interface {
 	Get(id string) (connector.Connector, error)
-	List() []connector.Connector
 }
