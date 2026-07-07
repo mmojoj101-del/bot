@@ -48,14 +48,13 @@ func TestEngine_Route_Static(t *testing.T) {
 		"conn-http": connector.NewMockConnector("conn-http", domain.ConnectorTypeHTTPClient),
 	}}
 
-	engine := NewEngine(routes, reg)
+	engine := NewEngine(routes, reg, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	decision, err := engine.Route(context.Background(), msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if decision.RouteID != "r1" {
 		t.Errorf("RouteID = %q, want r1", decision.RouteID)
 	}
@@ -71,8 +70,8 @@ func TestEngine_Route_NoMatch(t *testing.T) {
 	routes := []domain.Route{
 		route("uk", "44", "conn-uk", 10, true),
 	}
-	engine := NewEngine(routes, nil)
-	msg := &domain.Message{Destination: "+1234567890"} // US number
+	engine := NewEngine(routes, nil, nil)
+	msg := &domain.Message{Destination: "+1234567890"}
 
 	_, err := engine.Route(context.Background(), msg)
 	if err == nil {
@@ -91,7 +90,7 @@ func TestEngine_Route_AllUnhealthy(t *testing.T) {
 		"conn-bad": unhealthy,
 	}}
 
-	engine := NewEngine(routes, reg)
+	engine := NewEngine(routes, reg, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	_, err := engine.Route(context.Background(), msg)
@@ -111,7 +110,7 @@ func TestEngine_Route_HealthyConnector(t *testing.T) {
 		"conn-ok": healthy,
 	}}
 
-	engine := NewEngine(routes, reg)
+	engine := NewEngine(routes, reg, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	decision, err := engine.Route(context.Background(), msg)
@@ -133,7 +132,7 @@ func TestEngine_Route_RoundRobin(t *testing.T) {
 		"conn-b": connector.NewMockConnector("conn-b", domain.ConnectorTypeHTTPClient),
 	}}
 
-	engine := NewEngine(routes, reg)
+	engine := NewEngine(routes, reg, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	d1, _ := engine.Route(context.Background(), msg)
@@ -154,7 +153,7 @@ func TestEngine_Route_PremiumRouteWins(t *testing.T) {
 		"conn-premium": connector.NewMockConnector("conn-premium", domain.ConnectorTypeHTTPClient),
 	}}
 
-	engine := NewEngine(routes, reg)
+	engine := NewEngine(routes, reg, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	decision, err := engine.Route(context.Background(), msg)
@@ -171,7 +170,7 @@ func TestEngine_Route_NilRegistry(t *testing.T) {
 		route("r1", "1", "conn-http", 10, true),
 	}
 
-	engine := NewEngine(routes, nil)
+	engine := NewEngine(routes, nil, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	decision, err := engine.Route(context.Background(), msg)
@@ -196,26 +195,24 @@ func TestEngine_Route_UnhealthySkippedFallsToBackup(t *testing.T) {
 		"conn-ok":  connector.NewMockConnector("conn-ok", domain.ConnectorTypeHTTPClient),
 	}}
 
-	engine := NewEngine(routes, reg)
+	engine := NewEngine(routes, reg, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	decision, err := engine.Route(context.Background(), msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should fall back to backup (conn-ok) because primary is unhealthy
 	if decision.ConnectorID != "conn-ok" {
 		t.Errorf("expected backup conn-ok (primary unhealthy), got %s", decision.ConnectorID)
 	}
 }
 
 func TestEngine_Route_NilRegistrySkipsHealthCheck(t *testing.T) {
-	// Without a registry, all routes are assumed healthy even without HealthChecker.
 	routes := []domain.Route{
 		route("r1", "1", "conn-unknown", 10, true),
 	}
 
-	engine := NewEngine(routes, nil)
+	engine := NewEngine(routes, nil, nil)
 	msg := &domain.Message{Destination: "+1234567890"}
 
 	decision, err := engine.Route(context.Background(), msg)
@@ -224,5 +221,25 @@ func TestEngine_Route_NilRegistrySkipsHealthCheck(t *testing.T) {
 	}
 	if decision.ConnectorID != "conn-unknown" {
 		t.Errorf("expected conn-unknown, got %s", decision.ConnectorID)
+	}
+}
+
+func TestRouteGroupID(t *testing.T) {
+	tests := []struct {
+		name     string
+		route    domain.Route
+		expected string
+	}{
+		{"static", route("r1", "1", "c1", 10, true), "1:10:static"},
+		{"round-robin", domain.Route{Prefix: "44", Priority: 5, Strategy: domain.RouteStrategyRoundRobin}, "44:5:round_robin"},
+		{"empty prefix", domain.Route{Prefix: "", Priority: 1, Strategy: domain.RouteStrategyFailover}, ":1:failover"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RouteGroupID(tt.route); got != tt.expected {
+				t.Errorf("RouteGroupID() = %q, want %q", got, tt.expected)
+			}
+		})
 	}
 }

@@ -137,6 +137,25 @@ func (s *WeightedSelector) Select(routes []domain.Route) (*domain.Route, error) 
 	return &routes[0], nil
 }
 
+// SelectorFactory creates a Selector for a given strategy.
+// Implementations can register custom strategies without modifying the engine.
+type SelectorFactory interface {
+	Create(strategy domain.RouteStrategy) (Selector, error)
+}
+
+// SelectorFactoryFunc adapts a function to the SelectorFactory interface.
+type SelectorFactoryFunc func(domain.RouteStrategy) (Selector, error)
+
+func (f SelectorFactoryFunc) Create(strategy domain.RouteStrategy) (Selector, error) {
+	return f(strategy)
+}
+
+// DefaultSelectorRegistry is the default SelectorFactory using a registry map.
+// New strategies can be registered here without modifying the engine or switch.
+var DefaultSelectorRegistry = SelectorFactoryFunc(func(strategy domain.RouteStrategy) (Selector, error) {
+	return SelectorForStrategy(strategy)
+})
+
 // SelectorForStrategy returns the appropriate Selector for a given strategy.
 // WeightedSelector uses the default random source (math/rand).
 func SelectorForStrategy(strategy domain.RouteStrategy) (Selector, error) {

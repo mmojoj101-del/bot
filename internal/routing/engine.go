@@ -15,14 +15,16 @@ import (
 //  1. Match routes by message destination (longest prefix)
 //  2. Filter unhealthy connectors (if HealthChecker available)
 //  3. Determine strategy from the best matching route
-//  4. Create (or reuse) Selector for that strategy
+//  4. Create (or reuse) Selector for that strategy's RouteGroup
 //  5. Apply selection strategy → RoutingDecision
 //
-// Selectors are cached per strategy so stateful selectors
-// (RoundRobin, Weighted) persist across Route() calls.
+// Selectors are cached by RouteGroupID (prefix:priority:strategy), NOT by strategy
+// alone. This ensures RoundRobin counters for prefix "1" and prefix "44" are
+// independent even if both use the same strategy.
 type Engine struct {
 	routes    []domain.Route
 	registry  ConnectorResolver
+	factory   SelectorFactory
 	selectors map[string]Selector
 	mu        sync.Mutex
 }
@@ -31,10 +33,15 @@ type Engine struct {
 //
 // routes: all enabled routes (matching/filtering happens internally)
 // registry: optional connector resolver for health checking (may be nil)
-func NewEngine(routes []domain.Route, registry ConnectorResolver) *Engine {
+// factory: optional selector factory (nil = use DefaultSelectorRegistry)
+func NewEngine(routes []domain.Route, registry ConnectorResolver, factory SelectorFactory) *Engine {
+	if factory == nil {
+		factory = DefaultSelectorRegistry
+	}
 	return &Engine{
 		routes:    routes,
 		registry:  registry,
+		factory:   factory,
 		selectors: make(map[string]Selector),
 	}
 }
@@ -54,10 +61,10 @@ func (e *Engine) Route(ctx context.Context, msg *domain.Message) (*domain.Routin
 	}
 
 	// Determine strategy from the best-matching route (first in sorted order).
-	primaryStrategy := healthy[0].Strategy
+	primary := healthy[0]
 
-	// Get or create selector for this strategy.
-	selector, err := e.getOrCreateSelector(primaryStrategy)
+	// Get or create selector for this route's strategy group.
+	selector, err := e.getOrCreateSelector(primary)
 	if err != nil {
 		return nil, fmt.Errorf("routing: %w", err)
 	}
@@ -77,10 +84,18 @@ func (e *Engine) Route(ctx context.Context, msg *domain.Message) (*domain.Routin
 	}, nil
 }
 
-// getOrCreateSelector returns a cached selector for the strategy, creating one if needed.
-// Stateful selectors (RoundRobin, Weighted) persist across Route() calls this way.
-func (e *Engine) getOrCreateSelector(strategy domain.RouteStrategy) (Selector, error) {
-	key := string(strategy)
+// RouteGroupID uniquely identifies a group of routes that share a selector.
+// Routes with the same prefix, priority, and strategy form a group — they share
+// one stateful selector (e.g., one RoundRobin counter per group).
+func RouteGroupID(r domain.Route) string {
+	return fmt.Sprintf("%s:%d:%s", r.Prefix, r.Priority, r.Strategy)
+}
+
+// getOrCreateSelector returns a cached selector for the route's group,
+// creating one if needed. Keyed by RouteGroupID so different route groups
+// (e.g., Egypt round_robin vs Saudi round_robin) have independent state.
+func (e *Engine) getOrCreateSelector(route domain.Route) (Selector, error) {
+	key := RouteGroupID(route)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -89,7 +104,7 @@ func (e *Engine) getOrCreateSelector(strategy domain.RouteStrategy) (Selector, e
 		return s, nil
 	}
 
-	s, err := SelectorForStrategy(strategy)
+	s, err := e.factory.Create(route.Strategy)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +114,21 @@ func (e *Engine) getOrCreateSelector(strategy domain.RouteStrategy) (Selector, e
 }
 
 // filterHealthy returns routes whose connectors are healthy.
+//
+// TODO(v0.3): Replace per-Route() health checks with Background Health Monitor.
+//   Current approach calls CheckHealth() for every Route() call, which becomes
+//   prohibitively expensive at high throughput (20k+ msg/sec).
+//
+//   Future design:
+//
+//	type HealthMonitor interface {
+//	    Start(ctx context.Context)
+//	    IsHealthy(connectorID string) bool
+//	    Subscribe(connectorID string, callback func(healthy bool))
+//	}
+//
+//   Background Health Monitor updates atomic health states periodically.
+//   Engine reads IsHealthy() from the monitor — zero network calls during routing.
 func (e *Engine) filterHealthy(ctx context.Context, routes []domain.Route) []domain.Route {
 	if e.registry == nil {
 		return routes // no health checking

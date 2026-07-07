@@ -210,3 +210,48 @@ func TestSelectorForStrategy_Unknown(t *testing.T) {
 		t.Fatal("expected error for unknown strategy")
 	}
 }
+
+func TestDefaultSelectorRegistry(t *testing.T) {
+	tests := []struct {
+		strategy domain.RouteStrategy
+		expected string
+	}{
+		{domain.RouteStrategyStatic, "static"},
+		{domain.RouteStrategyRoundRobin, "round_robin"},
+		{domain.RouteStrategyFailover, "failover"},
+		{domain.RouteStrategyWeighted, "weighted"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.strategy), func(t *testing.T) {
+			s, err := DefaultSelectorRegistry.Create(tt.strategy)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if s.Name() != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, s.Name())
+			}
+		})
+	}
+
+	// Unknown strategy should error
+	_, err := DefaultSelectorRegistry.Create("unknown")
+	if err == nil {
+		t.Fatal("expected error for unknown strategy in DefaultSelectorRegistry")
+	}
+}
+
+func TestSelectorFactoryFunc(t *testing.T) {
+	// SelectorFactoryFunc adapts a function to SelectorFactory.
+	var factory SelectorFactory = SelectorFactoryFunc(func(s domain.RouteStrategy) (Selector, error) {
+		return NewStaticSelector(), nil
+	})
+
+	s, err := factory.Create(domain.RouteStrategyFailover) // any strategy returns static
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.Name() != "static" {
+		t.Errorf("expected static, got %q", s.Name())
+	}
+}
