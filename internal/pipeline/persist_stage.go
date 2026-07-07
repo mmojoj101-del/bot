@@ -89,26 +89,18 @@ func (s *PersistStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 		input.ErrorMessage = &em
 	}
 
-	// Timestamps — set only on first transition to the respective status.
-	// COALESCE in the SQL handles nil = keep existing.
+	// Pass timestamps for the relevant status transitions.
+	// COALESCE in the SQL (sent_at = COALESCE($N, sent_at)) ensures
+	// existing timestamps are preserved — no need to check msg.SentAt here.
 	if delivery.Status == domain.MessageStatusSent || delivery.Status == domain.MessageStatusDelivered {
-		if msg.SentAt == nil {
-			input.SentAt = &now
-		}
+		input.SentAt = &now
 	}
 	if delivery.Status == domain.MessageStatusDelivered {
-		if msg.DeliveredAt == nil {
-			input.DeliveredAt = &now
-		}
+		input.DeliveredAt = &now
 	}
 	if delivery.Status == domain.MessageStatusFailed {
-		if msg.FailedAt == nil {
-			input.FailedAt = &now
-		}
-		// If pipeline failed before recording a send timestamp, record it retroactively.
-		if msg.SentAt == nil {
-			input.SentAt = &now
-		}
+		input.FailedAt = &now
+		input.SentAt = &now // retroactive if never sent
 	}
 
 	// Price/Cost from domain result — if available.

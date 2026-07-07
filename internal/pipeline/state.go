@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"github.com/raghna/fury-sms-gateway/internal/domain"
+	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
 
 // PipelineState carries message context through all pipeline stages.
@@ -10,10 +11,11 @@ import (
 //
 // Artifact chain (each stage → one new artifact, immutable thereafter):
 //
-//	Message ──→ PreparedMessage ──→ RoutingDecision ──→ SendResult ──→ DeliveryOutcome
-//	  (input)    PrepareStage          RouteStage         SendStage       HandleResultStage
-//	                                                                     ├─ PersistStage (writes)
-//	                                                                     └─ EmitStage (publishes)
+//	Message ──→ PreparedMessage ──→ RoutingDecision ──→ SendResult ──→ DeliveryOutcome ──→ PendingEvents
+//	  (input)    PrepareStage          RouteStage         SendStage       HandleResultStage    EmitStage
+//	                                                                     ├─ PersistStage (writes state)
+//	                                                                     ├─ EmitStage (publishes events)
+//	                                                                     └─ RetryDecorator (schedules retry)
 type PipelineState struct {
 	// Message is the canonical domain message being processed. Immutable in the pipeline.
 	Message *domain.Message
@@ -34,6 +36,10 @@ type PipelineState struct {
 	// (set by HandleResultStage). PersistStage and EmitStage read it
 	// but never modify it. Retry scheduling is external (RetryPolicy).
 	DeliveryOutcome *DeliveryOutcome
+
+	// PendingEvents is an ordered list of domain events produced by
+	// HandleResultStage. EmitStage publishes them (and nothing else).
+	PendingEvents []events.EventEnvelope
 
 	// TraceID is the cross-lifecycle trace identifier.
 	TraceID string

@@ -267,9 +267,10 @@ func TestPersistStage_ExistingTimestampsNotOverwritten(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// SentAt should be nil (not overwritten) — COALESCE handles it.
-	if repo.updatedInput.SentAt != nil {
-		t.Error("Expected SentAt to be nil (already set, COALESCE keeps existing)")
+	// SentAt is always passed now — COALESCE in SQL protects existing values.
+	// We verify DeliveredAt is still set (was nil before update).
+	if repo.updatedInput.SentAt == nil {
+		t.Error("Expected SentAt to be passed (COALESCE handles non-overwrite)")
 	}
 	if repo.updatedInput.DeliveredAt == nil {
 		t.Error("Expected DeliveredAt to be set (was nil)")

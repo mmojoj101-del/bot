@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/raghna/fury-sms-gateway/internal/domain"
+	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
 
 func TestHandleResultStage_Name(t *testing.T) {
@@ -313,5 +314,64 @@ func TestNewDeliveryOutcome(t *testing.T) {
 	}
 	if d.Reason != "accepted, awaiting delivery receipt" {
 		t.Errorf("Reason = %q", d.Reason)
+	}
+}
+
+func TestHandleResultStage_ProducesPendingEvents(t *testing.T) {
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1"}, Text: "hello", TenantID: "tenant-1", RetryCount: 0, MaxRetries: 3}
+	state := NewPipelineState(msg, "trace-abc")
+	state.SendResult = &SendResult{
+		Success:    true,
+		ExternalID: "ext-123",
+		Parts:      1,
+		Acceptance: domain.AcceptanceFinal,
+	}
+
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.PendingEvents) == 0 {
+		t.Fatal("expected PendingEvents to be non-empty")
+	}
+	if result.PendingEvents[0].EventType != events.EventTypeMessageSentV1 {
+		t.Errorf("EventType = %q, want %q", result.PendingEvents[0].EventType, events.EventTypeMessageSentV1)
+	}
+	if result.PendingEvents[0].TraceID != "trace-abc" {
+		t.Errorf("TraceID = %q, want trace-abc", result.PendingEvents[0].TraceID)
+	}
+	if result.PendingEvents[0].TenantID != "tenant-1" {
+		t.Errorf("TenantID = %q, want tenant-1", result.PendingEvents[0].TenantID)
+	}
+	if result.DeliveryOutcome == nil {
+		t.Error("expected DeliveryOutcome to also be set")
+	}
+}
+
+func TestHandleResultStage_FailedEvent(t *testing.T) {
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-2"}, TenantID: "tenant-1", RetryCount: 0, MaxRetries: 3}
+	state := NewPipelineState(msg, "trace-xyz")
+	state.SendResult = &SendResult{
+		Success:      false,
+		ExternalID:   "",
+		ErrorCode:    "400",
+		ErrorMessage: "invalid dest",
+		Retryable:    false,
+		Acceptance:   domain.AcceptanceRejected,
+	}
+
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.PendingEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.PendingEvents))
+	}
+	if result.PendingEvents[0].EventType != events.EventTypeMessageFailedV1 {
+		t.Errorf("EventType = %q, want %q", result.PendingEvents[0].EventType, events.EventTypeMessageFailedV1)
 	}
 }
