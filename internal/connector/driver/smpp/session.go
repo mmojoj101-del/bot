@@ -68,7 +68,7 @@ var (
 //   - Creates all components (Transport, Codec, Window, WriteQueue, Dispatcher, Reader)
 //   - Starts/stops goroutines (Reader, WriteQueue)
 //   - Manages state transitions (Connect → Bind → Send → Disconnect)
-//   - Controls shutdown order (cancel → reader exit → drain queue → fail pending → close)
+//   - Controls shutdown order (cancel → reader exit → fail pending → close)
 //
 // Session provides a high-level API:
 //
@@ -78,6 +78,27 @@ var (
 //
 // All PDUs (Bind, SubmitSM, Unbind, EnquireLink) use SendRequest internally.
 // No PDU type gets a special path — this guarantees uniform behaviour.
+//
+// ── Write Paths (INTENTIONAL — do not unify without understanding) ──
+//
+// Two write paths exist:
+//
+//  1. Direct (SendRequest): application goroutines call slot.Write(transport, pdu).
+//     This encodes, registers pending, and writes to transport directly.
+//     These goroutines are NOT the Reader — blocking on transport Write is safe.
+//
+//  2. WriteQueue (handlers): Reader/Dispatcher handlers call writeQ.TryEnqueue(pdu).
+//     The WriteQueue goroutine drains and writes to transport.
+//     This path is NON-BLOCKING (TryEnqueue) — the Reader never blocks.
+//
+// Why two paths? Because unifying them would force SendRequest to go through
+// the WriteQueue, adding latency under queue backpressure. Application requests
+// (SubmitSM, Bind) should not be delayed by handler responses (DeliverSMResp).
+//
+// Both paths share the same tcpTransport.WritePDU mutex, so they are safe
+// for concurrent use. If future features (tracing, rate limiting) need a
+// single write hook, consider adding a WriteHook middleware to tcpTransport
+// rather than eliminating the direct path.
 type Session struct {
 	mu    sync.Mutex
 	state SessionState

@@ -169,7 +169,17 @@ func (wq *WriteQueue) Start(transport SMPPTransport, codec *Codec) {
 }
 
 // Stop cancels the queue context and waits for the writer goroutine to exit.
-// After Stop, Enqueue/TryEnqueue return the internal context error.
+//
+// Stop behavior:
+//   - Cancels the internal context immediately.
+//   - The writer goroutine exits on the next select iteration (after current
+//     write completes — no mid-write cancellation).
+//   - Any PDUs remaining in the buffer are DROPPED (not drained).
+//   - After Stop, Enqueue/TryEnqueue return the internal context error.
+//
+// Design rationale: during shutdown, PendingStore.Clear() fails all
+// outstanding requests. The responses for those requests (if any) are
+// irrelevant. Draining would unnecessarily delay shutdown.
 func (wq *WriteQueue) Stop() {
 	wq.cancel()
 	wq.wg.Wait()
