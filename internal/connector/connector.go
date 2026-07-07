@@ -46,6 +46,10 @@ type GenericConnector struct {
 	initDone bool
 	initVer  int64
 
+	// sessionMu serializes Connect/Disconnect operations.
+	// Prevents double-connect and connect-vs-disconnect races.
+	sessionMu sync.Mutex
+
 	// hooks caches optional driver capabilities discovered once at init.
 	// Zero type-assertion overhead on hot paths (Send).
 	hooks driverHooks
@@ -56,16 +60,6 @@ type GenericConnector struct {
 type driverHooks struct {
 	statefulDriver StatefulDriver
 	lifecycle      StatefulDriverLifecycle
-}
-
-// hasStatefulSession returns true if the driver implements StatefulDriver.
-func (h *driverHooks) hasStatefulSession() bool {
-	return h.statefulDriver != nil
-}
-
-// isStatefulCached returns true if the stateful session is currently active.
-func (h *driverHooks) isStatefulCached() bool {
-	return h.statefulDriver != nil && h.statefulDriver.IsConnected()
 }
 
 type GenericConnectorOption func(*GenericConnector)
@@ -268,40 +262,51 @@ func (c *GenericConnector) Reconfigure(config ConnectorConfig) {
 }
 
 // Connect establishes a session for stateful drivers (SMPP, SIP).
-// No-op for stateless drivers (HTTP). Uses cached hook — zero type assertion.
-// Mutex is released BEFORE network I/O to avoid blocking other operations.
+// No-op for stateless drivers (HTTP). Uses cached hook — no type assertion.
+//
+// Thread-safety:
+//   - c.mu: read cached hook reference (released before I/O)
+//   - c.sessionMu: serializes Connect vs Disconnect (no overlap)
+//   - Double-check: IsConnected() checked again after acquiring sessionMu
+//     to prevent double-connect races.
 func (c *GenericConnector) Connect(ctx context.Context) error {
 	c.mu.Lock()
-	if !c.hooks.hasStatefulSession() {
-		c.mu.Unlock()
-		return nil
-	}
-	if c.hooks.statefulDriver.IsConnected() {
-		c.mu.Unlock()
-		return nil
-	}
 	sd := c.hooks.statefulDriver
-	c.mu.Unlock() // ← release before network I/O
+	c.mu.Unlock()
+	if sd == nil {
+		return nil
+	}
 
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+
+	// Double-check: another goroutine may have connected while we waited.
+	if sd.IsConnected() {
+		return nil
+	}
 	return sd.Connect(ctx)
 }
 
 // Disconnect tears down a session for stateful drivers.
-// No-op for stateless drivers. Uses cached hook — zero type assertion.
-// Mutex is released BEFORE network I/O.
+// No-op for stateless drivers. Uses cached hook — no type assertion.
+//
+// Thread-safety:
+//   - Uses same sessionMu as Connect to prevent connect-vs-disconnect races.
+//   - Double-check: IsConnected() checked again after acquiring sessionMu.
 func (c *GenericConnector) Disconnect(ctx context.Context) error {
 	c.mu.Lock()
-	if !c.hooks.hasStatefulSession() {
-		c.mu.Unlock()
-		return nil
-	}
-	if !c.hooks.statefulDriver.IsConnected() {
-		c.mu.Unlock()
-		return nil
-	}
 	sd := c.hooks.statefulDriver
-	c.mu.Unlock() // ← release before network I/O
+	c.mu.Unlock()
+	if sd == nil {
+		return nil
+	}
 
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+
+	if !sd.IsConnected() {
+		return nil
+	}
 	return sd.Disconnect(ctx)
 }
 

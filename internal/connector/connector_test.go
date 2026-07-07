@@ -3,7 +3,9 @@ package connector
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/raghna/fury-sms-gateway/internal/connector/rule"
 	"github.com/raghna/fury-sms-gateway/internal/domain"
@@ -256,6 +258,178 @@ func BenchmarkGenericConnector_Send(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_, _ = conn.Send(ctx, req)
 	}
+}
+
+// ── StatefulDriver mock + concurrency tests ──────────────────────────────────
+
+// mockStatefulDriver implements StatefulDriver with connect call counting.
+type mockStatefulDriver struct {
+	mockDriver
+	connectCount   int
+	disconnectCount int
+	connected      bool
+	connectDelay   time.Duration
+	mu             sync.Mutex
+}
+
+func (m *mockStatefulDriver) Connect(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.connectDelay > 0 {
+		time.Sleep(m.connectDelay)
+	}
+	m.connectCount++
+	m.connected = true
+	return nil
+}
+
+func (m *mockStatefulDriver) Disconnect(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.disconnectCount++
+	m.connected = false
+	return nil
+}
+
+func (m *mockStatefulDriver) IsConnected() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connected
+}
+
+// TestConcurrentConnect_NoDoubleConnect verifies that parallel Connect calls
+// result in only one actual driver.Connect() invocation (sessionMu + double-check).
+func TestConcurrentConnect_NoDoubleConnect(t *testing.T) {
+	sd := &mockStatefulDriver{
+		connectDelay: 50 * time.Millisecond,
+	}
+	conn := NewGenericConnector("stateful-test", "smpp", ConnectorConfig{}, sd)
+
+	// Force lazyInit to discover stateful capabilities
+	conn.lazyInit()
+
+	ctx := context.Background()
+	const goroutines = 10
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = conn.Connect(ctx)
+		}(i)
+	}
+	wg.Wait()
+
+	// Check all succeeded
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: Connect error: %v", i, err)
+		}
+	}
+
+	if sd.connectCount != 1 {
+		t.Errorf("expected exactly 1 Connect call, got %d", sd.connectCount)
+	}
+	if !conn.hooks.statefulDriver.IsConnected() {
+		t.Error("connector should be connected after Connect")
+	}
+}
+
+// TestConcurrentDisconnect_NoDoubleDisconnect verifies parallel Disconnect calls
+// result in only one actual driver.Disconnect() invocation.
+func TestConcurrentDisconnect_NoDoubleDisconnect(t *testing.T) {
+	sd := &mockStatefulDriver{
+		connected: true,
+	}
+	conn := NewGenericConnector("stateful-test", "smpp", ConnectorConfig{}, sd)
+	conn.lazyInit()
+
+	ctx := context.Background()
+	const goroutines = 10
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = conn.Disconnect(ctx)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: Disconnect error: %v", i, err)
+		}
+	}
+
+	if sd.disconnectCount != 1 {
+		t.Errorf("expected exactly 1 Disconnect call, got %d", sd.disconnectCount)
+	}
+	if conn.hooks.statefulDriver.IsConnected() {
+		t.Error("connector should be disconnected after Disconnect")
+	}
+}
+
+// TestConcurrentConnectDisconnect_NoRace verifies that Connect and Disconnect
+// running concurrently don't race — serialized by sessionMu.
+func TestConcurrentConnectDisconnect_NoRace(t *testing.T) {
+	sd := &mockStatefulDriver{
+		connectDelay:    20 * time.Millisecond,
+		connected:       false,
+	}
+	conn := NewGenericConnector("stateful-test", "smpp", ConnectorConfig{}, sd)
+	conn.lazyInit()
+
+	ctx := context.Background()
+	errs := make([]error, 4)
+	var wg sync.WaitGroup
+
+	// Two Connect + two Disconnect concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[0] = conn.Connect(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[1] = conn.Connect(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(5 * time.Millisecond) // ensure Connect starts first
+		errs[2] = conn.Disconnect(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(10 * time.Millisecond)
+		errs[3] = conn.Disconnect(ctx)
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: error: %v", i, err)
+		}
+	}
+
+	// Total connect calls should be exactly 1 (second sees connected via double-check)
+	if sd.connectCount != 1 {
+		t.Errorf("expected 1 Connect call, got %d", sd.connectCount)
+	}
+	// Total disconnect calls should be exactly 1 (second sees not-connected via double-check)
+	if sd.disconnectCount != 1 {
+		t.Errorf("expected 1 Disconnect call, got %d", sd.disconnectCount)
+	}
+
+	// Final state depends on ordering — both are valid
+	t.Logf("Final connected state: %v (valid regardless)", conn.hooks.statefulDriver.IsConnected())
 }
 
 // ── renderStructFields tests ──────────────────────────────────────────────────
