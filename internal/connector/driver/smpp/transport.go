@@ -17,6 +17,15 @@ import (
 // The abstraction exists so the entire SMPP Session Engine can be tested
 // without a real socket.
 //
+// PDU framing contract:
+//   - ReadPDU returns exactly ONE complete PDU (including the 4-byte length
+//     header). TCP fragmentation (split PDUs across packets) is handled
+//     internally by the implementation — the Reader never sees partial data.
+//   - The PDU begins with a 4-byte big-endian length field that specifies
+//     the total PDU length (including the 4-byte length field itself).
+//   - tcpTransport handles this via io.ReadFull and bufio.Reader.
+//   - fakeTransport should deliver complete PDUs atomically.
+//
 // Concurrency contract:
 //   - ReadPDU must be called from a single goroutine (the Reader).
 //   - WritePDU is safe for concurrent calls (mutex-protected in tcpTransport).

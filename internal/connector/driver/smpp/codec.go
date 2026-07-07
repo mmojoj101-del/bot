@@ -2,6 +2,7 @@ package smpp
 
 import (
 	"fmt"
+	"sync/atomic"
 )
 
 // ── Decoder Registry ─────────────────────────────────────────────────────────
@@ -20,11 +21,11 @@ type DecoderFunc func(hdr *Header, body []byte) (PDU, error)
 //
 // Concurrency: RegisterDecoder MUST be called before the first Decode/Encode
 // call (i.e., during initialization), NOT concurrently with ongoing operations.
-// Call Freeze() after all registrations to make the registry immutable.
+// Freeze() is called automatically on first Decode/Encode via atomic.Bool.
 type Codec struct {
 	Version  Version
 	decoders map[CommandID]DecoderFunc
-	frozen   bool
+	frozen   atomic.Bool
 }
 
 // NewCodec creates a Codec for the given SMPP version,
@@ -55,7 +56,7 @@ func NewCodec(version Version) *Codec {
 // MUST be called during initialization, before the first Decode/Encode.
 // Panics if the codec is frozen. Thread-safe only when called from one goroutine.
 func (c *Codec) RegisterDecoder(cmd CommandID, fn DecoderFunc) {
-	if c.frozen {
+	if c.frozen.Load() {
 		panic("smpp: codec is frozen — cannot register decoder after first use")
 	}
 	c.decoders[cmd] = fn
@@ -64,12 +65,12 @@ func (c *Codec) RegisterDecoder(cmd CommandID, fn DecoderFunc) {
 // Freeze makes the decoder registry immutable.
 // Call after all decoders are registered, before concurrent usage.
 func (c *Codec) Freeze() {
-	c.frozen = true
+	c.frozen.Store(true)
 }
 
 // Decode parses a complete SMPP PDU from binary data.
 func (c *Codec) Decode(data []byte) (PDU, error) {
-	c.frozen = true // freeze on first use
+	c.frozen.Store(true) // freeze on first use
 	if len(data) < 16 {
 		return nil, fmt.Errorf("%w: got %d bytes, need at least 16", ErrShortHeader, len(data))
 	}
