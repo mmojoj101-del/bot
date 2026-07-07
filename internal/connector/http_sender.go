@@ -190,11 +190,12 @@ func (s *HTTPSender) Send(ctx context.Context, req domain.SendRequest) (*domain.
 	}
 	price := int64(parts) * 5000 // placeholder: 0.05 per part
 
-	// Determine acceptance semantics.
-	// With an external ID → final acceptance (message is at the provider).
-	// Without an ID on HTTP 202 → likely queued/provisionally accepted.
+	// Determine acceptance semantics based on HTTP protocol knowledge.
+	// - Success + externalID: provider accepted the message (Final).
+	// - Success + no externalID: provider queued it, DLR may follow (PendingDLR).
+	// - Non-success: handled above (returned as error, not reachable here).
 	acceptance := domain.AcceptanceFinal
-	if externalID == "" && resp.StatusCode == 202 {
+	if externalID == "" {
 		acceptance = domain.AcceptancePendingDLR
 	}
 

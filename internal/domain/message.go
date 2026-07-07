@@ -180,9 +180,13 @@ type Sender interface {
 	Send(ctx context.Context, req SendRequest) (*SendResult, error)
 }
 
-// RetryPolicy defines the backoff strategy for message retries.
+// RetryPolicy defines the backoff timing for message retries.
+// The pipeline handles the retry budget check (MaxRetries on Message)
+// and calls NextDelay only when a retry is actually needed.
+// Implementation MUST be safe for concurrent use.
 type RetryPolicy interface {
-	MaxRetries() int
+	// NextDelay returns the backoff duration for the given attempt number.
+	// attempt is zero-based (0 = first retry after initial failure).
 	NextDelay(attempt int) time.Duration
 }
 
