@@ -90,13 +90,14 @@ type ResponseData struct {
 	Parsed map[string]interface{}
 
 	// Fields holds additional protocol-specific context.
-	// Set by GenericConnector before calling Evaluate.
+	// Generic across all protocols — set by GenericConnector.
 	// Examples:
-	//   "body.message_id" → "ext-123"
-	//   "header.content_type" → "application/json"
-	//   "smpp.command_status" → "ESME_ROK"
-	//   "latency_ms" → "42"
-	Fields map[string]string
+	//   "body.message_id" → "ext-123" (string)
+	//   "latency_ms" → 42 (float64 from rule comparison)
+	//   "smpp.command_status" → "ESME_ROK" (string)
+	//   "parts" → 1 (float64)
+	// Use `map[string]any` so numeric/boolean values don't need string parsing.
+	Fields map[string]any
 }
 
 // Result holds the outcome of rule evaluation.
@@ -297,7 +298,7 @@ func (e *Engine) extractField(resp ResponseData, path string) string {
 			return ""
 		}
 		if resp.Fields != nil {
-			return resp.Fields[parts[1]]
+			return fmt.Sprint(resp.Fields[parts[1]])
 		}
 		return ""
 	}
@@ -305,7 +306,7 @@ func (e *Engine) extractField(resp ResponseData, path string) string {
 	// No prefix: try Fields, then body.<path> as fallback
 	if resp.Fields != nil {
 		if v, ok := resp.Fields[path]; ok {
-			return v
+			return fmt.Sprint(v)
 		}
 	}
 	return e.navigateJSON(resp, path)

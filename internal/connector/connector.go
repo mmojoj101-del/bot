@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,10 @@ type GenericConnector struct {
 	tmpl       *template.Engine
 	ruleEngine *rule.Engine
 	metrics    domain.MetricsRecorder
+
+	// decodedConfig is the cached, decoded transport config (before per-message rendering).
+	// Set during lazyInit, used by CheckHealth.
+	decodedConfig TransportConfig
 
 	mu   sync.Mutex
 	once sync.Once
@@ -84,6 +89,19 @@ func (c *GenericConnector) lazyInit() {
 		if c.ruleEngine == nil {
 			c.ruleEngine = rule.NewEngine()
 		}
+
+		// Decode the base transport config once (before per-message rendering).
+		// Driver-specific validation is NOT done here — we must validate AFTER
+		// field rendering so all required values are present.
+		if len(c.config.Transport) > 0 {
+			decoded, err := c.driver.DecodeConfig(c.config.Transport)
+			if err != nil {
+				// Decode failure means the transport JSON is fundamentally broken.
+				// We store nil here; Send() will re-attempt with a better error message.
+				return
+			}
+			c.decodedConfig = decoded
+		}
 	})
 }
 
@@ -92,12 +110,13 @@ func (c *GenericConnector) lazyInit() {
 // Flow:
 //  1. Render template data from message + prepared
 //  2. Render auth credentials into fields map
-//  3. Render transport JSON (replace {{key}} with field values)
-//  4. Decode rendered JSON via driver.DecodeConfig() → typed TransportConfig
-//  5. driver.Send(ctx, TransportRequest{Config: typedConfig})
-//  6. Build rule.ResponseData from TransportResponse
-//  7. Evaluate rules → accept/reject/retry/extract
-//  8. Record metrics, return domain.SendResult
+//  3. Decode transport JSON via driver.DecodeConfig() → typed TransportConfig
+//  4. Render TransportConfig string fields (field-by-field, JSON-safe)
+//  5. Validate rendered config via driver.ValidateConfig()
+//  6. driver.Send(ctx, TransportRequest{Config: typedConfig})
+//  7. Build rule.ResponseData from TransportResponse
+//  8. Evaluate rules → accept/reject/retry/extract
+//  9. Record metrics, return domain.SendResult
 func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*domain.SendResult, error) {
 	c.lazyInit()
 
@@ -110,7 +129,7 @@ func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*
 
 	start := time.Now()
 
-	// 1. Build template data from message
+	// 1. Build template data
 	data := template.Data{
 		Source:      req.Message.Source,
 		Destination: req.Prepared.Destination,
@@ -123,45 +142,31 @@ func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*
 		Custom:      c.config.Templates.Fields,
 	}
 
-	// 2. Render custom template fields
-	renderedFields := make(map[string]string)
-	for key, tmplStr := range c.config.Templates.Fields {
-		rendered, err := c.tmpl.Render(tmplStr, data)
-		if err != nil {
-			return nil, fmt.Errorf("connector %q: render field %q: %w", c.id, key, err)
-		}
-		renderedFields[key] = rendered
-	}
-	// Standard fields always available
-	renderedFields["source"] = data.Source
-	renderedFields["destination"] = data.Destination
-	renderedFields["text"] = data.Text
-	renderedFields["message_id"] = data.MessageID
-	renderedFields["tenant_id"] = data.TenantID
-	renderedFields["client_ref"] = data.ClientRef
-	renderedFields["parts"] = fmt.Sprintf("%d", data.Parts)
-	renderedFields["encoding"] = data.Encoding
+	// 2. Render template fields → renderedFields
+	renderedFields := c.renderFields(data)
 
-	// 3. Render auth credentials into fields map
-	renderAuthCredentials(&c.config.Auth, renderedFields)
-
-	// 4. Render transport JSON: replace {{key}} with rendered values
-	renderedTransport := renderJSON(string(c.config.Transport), renderedFields)
-
-	// 5. Decode via driver
-	transportConfig, err := c.driver.DecodeConfig([]byte(renderedTransport))
+	// 3. Decode transport config (raw JSON — may contain {{key}} patterns)
+	transportConfig, err := c.driver.DecodeConfig(c.config.Transport)
 	if err != nil {
 		return nil, fmt.Errorf("connector %q: decode transport config: %w", c.id, err)
 	}
 
-	// 6. Build TransportRequest (no RenderedFields, no raw config — just typed config)
+	// 4. Render transport config string fields (JSON-safe — no escaping issues)
+	if err := renderStructFields(transportConfig, renderedFields); err != nil {
+		return nil, fmt.Errorf("connector %q: render transport: %w", c.id, err)
+	}
+
+	// 5. Validate the fully-rendered config
+	if err := c.driver.ValidateConfig(transportConfig); err != nil {
+		return nil, fmt.Errorf("connector %q: invalid config: %w", c.id, err)
+	}
+
+	// 6. Send via driver
 	transportReq := &TransportRequest{
 		Message:  req.Message,
 		Prepared: req.Prepared,
 		Config:   transportConfig,
 	}
-
-	// 7. Send via driver (raw transport, no interpretation)
 	transportResp, err := c.driver.Send(ctx, transportReq)
 	latency := time.Since(start)
 
@@ -170,41 +175,14 @@ func (c *GenericConnector) Send(ctx context.Context, req *domain.SendRequest) (*
 		return nil, fmt.Errorf("connector %q: send: %w", c.id, err)
 	}
 
-	// 8. Build rule response data
+	// 7. Build rule response data
 	ruleResp := c.buildRuleResponse(transportResp, renderedFields)
 
-	// 9. Evaluate rules
+	// 8. Evaluate rules
 	rulesResult := c.ruleEngine.Evaluate(c.config.Rules.Rules, ruleResp)
 
-	// 10. Determine acceptance
-	acceptance := c.determineAcceptance(rulesResult)
-	externalID := transportResp.ExternalID
-	if externalID == "" {
-		externalID = rulesResult.Extract["external_id"]
-	}
-
-	parts := req.Prepared.Parts
-	if p := rulesResult.Extract["parts"]; p != "" {
-		if v, err := parseInt(p); err == nil {
-			parts = v
-		}
-	}
-	var price int64
-	if p := rulesResult.Extract["price"]; p != "" {
-		if v, err := parseInt64(p); err == nil {
-			price = v
-		}
-	}
-
-	result := &domain.SendResult{
-		ExternalID: externalID,
-		Parts:      parts,
-		Price:      price,
-		Cost:       price,
-		RawResponse: transportResp.Body,
-		ProviderStatus: rulesResult.Extract["provider_status"],
-		Acceptance: acceptance,
-	}
+	// 9. Determine acceptance + build result
+	result := c.buildResult(rulesResult, transportResp, req.Prepared.Parts)
 
 	if rulesResult.Accepted {
 		c.recordSuccess(req.Message.TenantID, result.Parts, latency)
@@ -220,7 +198,48 @@ func (c *GenericConnector) CheckHealth(ctx context.Context) error {
 	if !c.config.Health.Enabled {
 		return nil
 	}
-	return c.driver.CheckHealth(ctx)
+	if c.decodedConfig == nil {
+		// Try decoding now if lazyInit failed
+		if len(c.config.Transport) > 0 {
+			decoded, err := c.driver.DecodeConfig(c.config.Transport)
+			if err != nil {
+				return fmt.Errorf("connector %q: decode transport config for health: %w", c.id, err)
+			}
+			c.decodedConfig = decoded
+		}
+	}
+	return c.driver.CheckHealth(ctx, c.decodedConfig)
+}
+
+// ── Internal helpers ─────────────────────────────────────────────────────────
+
+// renderFields produces a string-keyed map from template data + auth credentials.
+func (c *GenericConnector) renderFields(data template.Data) map[string]string {
+	fields := make(map[string]string)
+
+	for key, tmplStr := range c.config.Templates.Fields {
+		rendered, err := c.tmpl.Render(tmplStr, data)
+		if err != nil {
+			// Best-effort: use the raw template string on error
+			rendered = tmplStr
+		}
+		fields[key] = rendered
+	}
+
+	// Standard fields always available
+	fields["source"] = data.Source
+	fields["destination"] = data.Destination
+	fields["text"] = data.Text
+	fields["message_id"] = data.MessageID
+	fields["tenant_id"] = data.TenantID
+	fields["client_ref"] = data.ClientRef
+	fields["parts"] = fmt.Sprintf("%d", data.Parts)
+	fields["encoding"] = data.Encoding
+
+	// Auth credentials
+	renderAuthCredentials(&c.config.Auth, fields)
+
+	return fields
 }
 
 // buildRuleResponse constructs rule.ResponseData from TransportResponse.
@@ -229,28 +248,58 @@ func (c *GenericConnector) buildRuleResponse(resp *TransportResponse, fields map
 		Status:  resp.Status,
 		Headers: resp.Headers,
 		Body:    resp.Body,
-		Fields:  make(map[string]string),
+		Fields:  make(map[string]any),
 	}
 
-	// Copy all rendered fields for rule access
 	for k, v := range fields {
 		r.Fields[k] = v
 	}
-	// Add transport metadata
-	r.Fields["latency_ms"] = fmt.Sprintf("%d", resp.Latency.Milliseconds())
+	r.Fields["latency_ms"] = float64(resp.Latency.Milliseconds())
 	if resp.ExternalID != "" {
 		r.Fields["external_id"] = resp.ExternalID
 	}
 
-	// Try JSON parse
 	if len(resp.Body) > 0 {
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		if err := json.Unmarshal(resp.Body, &parsed); err == nil {
 			r.Parsed = parsed
 		}
 	}
 
 	return r
+}
+
+func (c *GenericConnector) buildResult(r rule.Result, resp *TransportResponse, defaultParts int) *domain.SendResult {
+	externalID := resp.ExternalID
+	if externalID == "" {
+		externalID = r.Extract["external_id"]
+	}
+
+	parts := defaultParts
+	if p := r.Extract["parts"]; p != "" {
+		if v, err := parseInt(p); err == nil {
+			parts = v
+		}
+	}
+
+	var price int64
+	if p := r.Extract["price"]; p != "" {
+		if v, err := parseInt64(p); err == nil {
+			price = v
+		}
+	}
+
+	acceptance := c.determineAcceptance(r)
+
+	return &domain.SendResult{
+		ExternalID:     externalID,
+		Parts:          parts,
+		Price:          price,
+		Cost:           price,
+		RawResponse:    resp.Body,
+		ProviderStatus: r.Extract["provider_status"],
+		Acceptance:     acceptance,
+	}
 }
 
 func (c *GenericConnector) determineAcceptance(r rule.Result) domain.AcceptanceKind {
@@ -279,7 +328,6 @@ func (c *GenericConnector) recordFailure(tenantID string, reason string, latency
 }
 
 // renderAuthCredentials renders auth config into the fields map as template variables.
-// The transport config references these with {{auth_token}}, {{auth_username}}, etc.
 func renderAuthCredentials(cfg *AuthConfig, fields map[string]string) {
 	if cfg == nil {
 		return
@@ -290,10 +338,87 @@ func renderAuthCredentials(cfg *AuthConfig, fields map[string]string) {
 	}
 }
 
-// renderJSON replaces {{key}} patterns with values from the fields map.
-// This is a simple string replacement — NOT a full template engine.
-// Full Go template rendering is done by template.Engine for template fields.
-func renderJSON(s string, fields map[string]string) string {
+// renderStructFields does {{key}} replacement on all string fields of a struct
+// (or nested struct/map values) using reflection. This avoids JSON escaping issues
+// that would occur when substituting into raw JSON.
+//
+// Only exported string fields are processed. Pointers are followed.
+// Maps with string keys/values are processed.
+// Nested structs are processed recursively.
+func renderStructFields(v interface{}, fields map[string]string) error {
+	val := reflect.ValueOf(v)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+	return renderReflect(val, fields)
+}
+
+func renderReflect(val reflect.Value, fields map[string]string) error {
+	if !val.IsValid() {
+		return nil
+	}
+
+	switch val.Kind() {
+	case reflect.Struct:
+		t := val.Type()
+		for i := 0; i < val.NumField(); i++ {
+			field := val.Field(i)
+			if !field.CanSet() || !t.Field(i).IsExported() {
+				continue
+			}
+			if err := renderReflect(field, fields); err != nil {
+				return fmt.Errorf("field %s: %w", t.Field(i).Name, err)
+			}
+		}
+
+	case reflect.Ptr:
+		if val.IsNil() {
+			return nil
+		}
+		return renderReflect(val.Elem(), fields)
+
+	case reflect.String:
+		if val.String() == "" {
+			return nil
+		}
+		rendered := renderString(val.String(), fields)
+		if rendered != val.String() {
+			val.SetString(rendered)
+		}
+
+	case reflect.Map:
+		if val.IsNil() {
+			return nil
+		}
+		for _, key := range val.MapKeys() {
+			elem := val.MapIndex(key)
+			if elem.Kind() == reflect.String {
+				newVal := renderString(elem.String(), fields)
+				if newVal != elem.String() {
+					val.SetMapIndex(key, reflect.ValueOf(newVal))
+				}
+			}
+		}
+
+	case reflect.Slice:
+		for i := 0; i < val.Len(); i++ {
+			elem := val.Index(i)
+			if elem.Kind() == reflect.Ptr || elem.Kind() == reflect.Struct {
+				if err := renderReflect(elem, fields); err != nil {
+					return err
+				}
+			}
+		}
+
+	case reflect.Interface:
+		return renderReflect(val.Elem(), fields)
+	}
+
+	return nil
+}
+
+// renderString replaces {{key}} patterns with values from the fields map.
+func renderString(s string, fields map[string]string) string {
 	if !strings.Contains(s, "{{") {
 		return s
 	}

@@ -11,19 +11,32 @@ import (
 
 // mockDriver implements ProtocolDriver for testing.
 type mockDriver struct {
-	protocol   domain.ConnectorType
-	sendFunc   func(ctx context.Context, req *TransportRequest) (*TransportResponse, error)
-	healthFunc func(ctx context.Context) error
+	protocol         domain.ConnectorType
+	sendFunc         func(ctx context.Context, req *TransportRequest) (*TransportResponse, error)
+	healthFunc       func(ctx context.Context) error
+	validateFunc     func(cfg TransportConfig) error
+	decodeConfigFunc func(data []byte) (TransportConfig, error)
 }
 
 // mockConfig is a simple TransportConfig for testing.
 type mockConfig struct{}
+
 func (m *mockConfig) Protocol() domain.ConnectorType { return "mock" }
 
 func (m *mockDriver) Protocol() domain.ConnectorType { return m.protocol }
 
-func (m *mockDriver) DecodeConfig(_ []byte) (TransportConfig, error) {
+func (m *mockDriver) DecodeConfig(data []byte) (TransportConfig, error) {
+	if m.decodeConfigFunc != nil {
+		return m.decodeConfigFunc(data)
+	}
 	return &mockConfig{}, nil
+}
+
+func (m *mockDriver) ValidateConfig(cfg TransportConfig) error {
+	if m.validateFunc != nil {
+		return m.validateFunc(cfg)
+	}
+	return nil
 }
 
 func (m *mockDriver) Send(ctx context.Context, req *TransportRequest) (*TransportResponse, error) {
@@ -33,7 +46,7 @@ func (m *mockDriver) Send(ctx context.Context, req *TransportRequest) (*Transpor
 	return &TransportResponse{Status: 200}, nil
 }
 
-func (m *mockDriver) CheckHealth(ctx context.Context) error {
+func (m *mockDriver) CheckHealth(ctx context.Context, _ TransportConfig) error {
 	if m.healthFunc != nil {
 		return m.healthFunc(ctx)
 	}

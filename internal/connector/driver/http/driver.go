@@ -61,6 +61,30 @@ func (d *Driver) DecodeConfig(data []byte) (connector.TransportConfig, error) {
 	return &cfg, nil
 }
 
+func (d *Driver) ValidateConfig(cfg connector.TransportConfig) error {
+	tc, ok := cfg.(*HTTPTransportConfig)
+	if !ok {
+		return fmt.Errorf("http driver: expected *HTTPTransportConfig, got %T", cfg)
+	}
+	if tc.URL == "" {
+		return fmt.Errorf("http driver: URL is required")
+	}
+	parsed, err := url.Parse(tc.URL)
+	if err != nil {
+		return fmt.Errorf("http driver: invalid URL %q: %w", tc.URL, err)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("http driver: URL %q has no host", tc.URL)
+	}
+	switch tc.Method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
+		// valid
+	default:
+		return fmt.Errorf("http driver: unsupported method %q", tc.Method)
+	}
+	return nil
+}
+
 func (d *Driver) Send(ctx context.Context, req *connector.TransportRequest) (*connector.TransportResponse, error) {
 	tc, ok := req.Config.(*HTTPTransportConfig)
 	if !ok {
@@ -115,8 +139,12 @@ func (d *Driver) Send(ctx context.Context, req *connector.TransportRequest) (*co
 	}, nil
 }
 
-func (d *Driver) CheckHealth(_ context.Context) error {
-	return nil
+func (d *Driver) CheckHealth(ctx context.Context, cfg connector.TransportConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	// HTTP: just validate the config — no active connection needed
+	return d.ValidateConfig(cfg)
 }
 
 func (d *Driver) lazyClient() *http.Client {
