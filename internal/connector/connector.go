@@ -36,15 +36,36 @@ type GenericConnector struct {
 	circuitBreaker CircuitBreakerStore
 
 	// decodedConfig is the cached, decoded transport config (before per-message rendering).
-	// Set during lazyInit, used by CheckHealth.
+	// Set during init, used by CheckHealth.
 	decodedConfig TransportConfig
 
 	// configVersion increments every time Reconfigure is called.
-	// Checked in Send() to detect stale decodedConfig.
 	configVersion int64
 
-	mu  sync.Mutex
-	once sync.Once
+	mu       sync.Mutex
+	initDone bool
+	initVer  int64
+
+	// hooks caches optional driver capabilities discovered once at init.
+	// Zero type-assertion overhead on hot paths (Send).
+	hooks driverHooks
+}
+
+// driverHooks caches optional driver capabilities discovered at init time.
+// This avoids inline type assertions in Connect/Disconnect/Reconfigure.
+type driverHooks struct {
+	statefulDriver StatefulDriver
+	lifecycle      StatefulDriverLifecycle
+}
+
+// hasStatefulSession returns true if the driver implements StatefulDriver.
+func (h *driverHooks) hasStatefulSession() bool {
+	return h.statefulDriver != nil
+}
+
+// isStatefulCached returns true if the stateful session is currently active.
+func (h *driverHooks) isStatefulCached() bool {
+	return h.statefulDriver != nil && h.statefulDriver.IsConnected()
 }
 
 type GenericConnectorOption func(*GenericConnector)
@@ -89,29 +110,41 @@ func (c *GenericConnector) ID() string                   { return c.id }
 func (c *GenericConnector) Protocol() domain.ConnectorType { return c.protocol }
 
 func (c *GenericConnector) lazyInit() {
-	c.once.Do(func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.tmpl == nil {
-			c.tmpl = template.NewEngine()
-		}
-		if c.ruleEngine == nil {
-			c.ruleEngine = rule.NewEngine()
-		}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-		// Decode the base transport config once (before per-message rendering).
-		// Driver-specific validation is NOT done here — we must validate AFTER
-		// field rendering so all required values are present.
-		if len(c.config.Transport) > 0 {
-			decoded, err := c.driver.DecodeConfig(c.config.Transport)
-			if err != nil {
-				// Decode failure means the transport JSON is fundamentally broken.
-				// We store nil here; Send() will re-attempt with a better error message.
-				return
-			}
+	// Already initialized with current config version?
+	if c.initDone && c.initVer == c.configVersion {
+		return
+	}
+
+	if c.tmpl == nil {
+		c.tmpl = template.NewEngine()
+	}
+	if c.ruleEngine == nil {
+		c.ruleEngine = rule.NewEngine()
+	}
+
+	// Decode the base transport config.
+	c.decodedConfig = nil
+	if len(c.config.Transport) > 0 {
+		decoded, err := c.driver.DecodeConfig(c.config.Transport)
+		if err == nil {
 			c.decodedConfig = decoded
 		}
-	})
+	}
+
+	// Cache optional driver capabilities (one-time type assertions, not per-call)
+	c.hooks = driverHooks{}
+	if sd, ok := c.driver.(StatefulDriver); ok {
+		c.hooks.statefulDriver = sd
+	}
+	if sl, ok := c.driver.(StatefulDriverLifecycle); ok {
+		c.hooks.lifecycle = sl
+	}
+
+	c.initDone = true
+	c.initVer = c.configVersion
 }
 
 // Send implements the Connector interface.
@@ -221,51 +254,47 @@ func (c *GenericConnector) CheckHealth(ctx context.Context) error {
 }
 
 // Reconfigure updates the connector's runtime configuration.
-// This invalidates the cached decodedConfig — the next Send() or CheckHealth()
-// will re-decode the new transport config automatically.
-// Thread-safe: uses atomic counter to detect stale cache.
+// This bumps configVersion — the next lazyInit or Send will re-decode
+// the transport config automatically.
 //
+// Thread-safe: version-checked to prevent races.
 // The orchestrator calls this when an admin updates endpoint settings via API.
 func (c *GenericConnector) Reconfigure(config ConnectorConfig) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.config = config
-
-	// Invalidate lazyInit cache so lazyInit() re-runs on next access
-	c.once = sync.Once{}
-	c.decodedConfig = nil
-
-	// Notify stateful driver if it implements ConfigurableDriver
-	if cd, ok := c.driver.(ConfigurableDriver); ok && c.decodedConfig != nil {
-		_ = cd.AcceptConfig(c.decodedConfig) // best-effort
-	}
+	c.configVersion++
 }
 
 // Connect establishes a session for stateful drivers (SMPP, SIP).
-// No-op for stateless drivers (HTTP). Returns nil if not stateful.
+// No-op for stateless drivers (HTTP). Uses cached hook — zero type assertion.
 func (c *GenericConnector) Connect(ctx context.Context) error {
-	if sd, ok := c.driver.(StatefulDriver); ok {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if !sd.IsConnected() {
-			return sd.Connect(ctx)
-		}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.hooks.hasStatefulSession() {
+		return nil
 	}
-	return nil
+	if c.hooks.statefulDriver.IsConnected() {
+		return nil
+	}
+	return c.hooks.statefulDriver.Connect(ctx)
 }
 
 // Disconnect tears down a session for stateful drivers.
-// No-op for stateless drivers.
+// No-op for stateless drivers. Uses cached hook — zero type assertion.
 func (c *GenericConnector) Disconnect(ctx context.Context) error {
-	if sd, ok := c.driver.(StatefulDriver); ok {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if sd.IsConnected() {
-			return sd.Disconnect(ctx)
-		}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.hooks.hasStatefulSession() {
+		return nil
 	}
-	return nil
+	if !c.hooks.statefulDriver.IsConnected() {
+		return nil
+	}
+	return c.hooks.statefulDriver.Disconnect(ctx)
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -463,6 +492,10 @@ func renderReflect(val reflect.Value, fields map[string]string) error {
 				if err := renderReflect(elem, fields); err != nil {
 					return err
 				}
+			case reflect.Slice, reflect.Array:
+				if err := renderReflect(elem, fields); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -478,6 +511,30 @@ func renderReflect(val reflect.Value, fields map[string]string) error {
 				newVal := renderString(elem.String(), fields)
 				if newVal != elem.String() {
 					elem.SetString(newVal)
+				}
+			case reflect.Slice, reflect.Array:
+				if err := renderReflect(elem, fields); err != nil {
+					return err
+				}
+			}
+		}
+
+	case reflect.Array:
+		for i := 0; i < val.Len(); i++ {
+			elem := val.Index(i)
+			switch elem.Kind() {
+			case reflect.Ptr, reflect.Struct, reflect.Interface, reflect.Map:
+				if err := renderReflect(elem, fields); err != nil {
+					return err
+				}
+			case reflect.String:
+				newVal := renderString(elem.String(), fields)
+				if newVal != elem.String() {
+					elem.SetString(newVal)
+				}
+			case reflect.Slice, reflect.Array:
+				if err := renderReflect(elem, fields); err != nil {
+					return err
 				}
 			}
 		}
