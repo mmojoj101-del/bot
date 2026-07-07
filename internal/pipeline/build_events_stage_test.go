@@ -28,13 +28,12 @@ func TestBuildEventsStage_NilDeliveryOutcome(t *testing.T) {
 func TestBuildEventsStage_SentEvent(t *testing.T) {
 	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1"}, TenantID: "tenant-1"}
 	state := NewPipelineState(msg, "trace-abc")
-	state.Decision = &RoutingDecision{RouteID: "route-1", ConnectorID: "smpp-1"}
-	state.SendResult = &SendResult{
-		Success:    true,
-		ExternalID: "ext-999",
-		Parts:      2,
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status:       domain.MessageStatusSent,
+		ExternalID:   "ext-999",
+		ConnectorID:  "smpp-1",
+		Parts:        2,
 	}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
 
 	s := NewBuildEventsStage()
 	result, err := s.Process(context.Background(), state)
@@ -42,10 +41,10 @@ func TestBuildEventsStage_SentEvent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	if len(result.DomainEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.DomainEvents))
 	}
-	evt := result.Events[0]
+	evt := result.DomainEvents[0]
 	if evt.EventType != events.EventTypeMessageSentV1 {
 		t.Errorf("EventType = %q, want %q", evt.EventType, events.EventTypeMessageSentV1)
 	}
@@ -60,8 +59,10 @@ func TestBuildEventsStage_SentEvent(t *testing.T) {
 func TestBuildEventsStage_DeliveredEvent(t *testing.T) {
 	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-2"}, TenantID: "tenant-1"}
 	state := NewPipelineState(msg, "trace-def")
-	state.SendResult = &SendResult{Success: true, ExternalID: "ext-555"}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusDelivered}
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status:       domain.MessageStatusDelivered,
+		ExternalID:   "ext-555",
+	}
 
 	s := NewBuildEventsStage()
 	result, err := s.Process(context.Background(), state)
@@ -69,25 +70,24 @@ func TestBuildEventsStage_DeliveredEvent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	if len(result.DomainEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.DomainEvents))
 	}
-	if result.Events[0].EventType != events.EventTypeMessageDeliveredV1 {
-		t.Errorf("EventType = %q, want %q", result.Events[0].EventType, events.EventTypeMessageDeliveredV1)
+	if result.DomainEvents[0].EventType != events.EventTypeMessageDeliveredV1 {
+		t.Errorf("EventType = %q, want %q", result.DomainEvents[0].EventType, events.EventTypeMessageDeliveredV1)
 	}
 }
 
 func TestBuildEventsStage_FailedEvent(t *testing.T) {
 	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-3"}, TenantID: "tenant-1", RetryCount: 0, MaxRetries: 3}
 	state := NewPipelineState(msg, "trace-ghi")
-	state.SendResult = &SendResult{
-		Success:      false,
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status:       domain.MessageStatusFailed,
 		ExternalID:   "",
 		ErrorCode:    "400",
 		ErrorMessage: "invalid dest",
 		Retryable:    false,
 	}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusFailed}
 
 	s := NewBuildEventsStage()
 	result, err := s.Process(context.Background(), state)
@@ -95,18 +95,20 @@ func TestBuildEventsStage_FailedEvent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	if len(result.DomainEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.DomainEvents))
 	}
-	if result.Events[0].EventType != events.EventTypeMessageFailedV1 {
-		t.Errorf("EventType = %q, want %q", result.Events[0].EventType, events.EventTypeMessageFailedV1)
+	if result.DomainEvents[0].EventType != events.EventTypeMessageFailedV1 {
+		t.Errorf("EventType = %q, want %q", result.DomainEvents[0].EventType, events.EventTypeMessageFailedV1)
 	}
 }
 
 func TestBuildEventsStage_RetryingEvent(t *testing.T) {
 	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-4"}, TenantID: "tenant-1", RetryCount: 2, MaxRetries: 5}
 	state := NewPipelineState(msg, "trace-jkl")
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusRetrying}
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status: domain.MessageStatusRetrying,
+	}
 
 	s := NewBuildEventsStage()
 	result, err := s.Process(context.Background(), state)
@@ -114,31 +116,11 @@ func TestBuildEventsStage_RetryingEvent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	if len(result.DomainEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.DomainEvents))
 	}
-	if result.Events[0].EventType != events.EventTypeMessageRetryingV1 {
-		t.Errorf("EventType = %q, want %q", result.Events[0].EventType, events.EventTypeMessageRetryingV1)
-	}
-}
-
-func TestBuildEventsStage_ConnectorIDInSentEvent(t *testing.T) {
-	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-5"}, TenantID: "tenant-1"}
-	state := NewPipelineState(msg, "trace-mno")
-	state.Decision = &RoutingDecision{ConnectorID: "http-gateway-1"}
-	state.SendResult = &SendResult{Success: true, ExternalID: "ext-777", Parts: 1}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
-
-	s := NewBuildEventsStage()
-	result, err := s.Process(context.Background(), state)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// ConnectorID should be set in the sent event payload.
-	// We verify by checking the trace ID is correct and event type is sent.
-	if result.Events[0].EventType != events.EventTypeMessageSentV1 {
-		t.Error("expected sent event")
+	if result.DomainEvents[0].EventType != events.EventTypeMessageRetryingV1 {
+		t.Errorf("EventType = %q, want %q", result.DomainEvents[0].EventType, events.EventTypeMessageRetryingV1)
 	}
 }
 
@@ -154,35 +136,70 @@ func TestBuildEventsStage_UnknownStatus(t *testing.T) {
 	}
 }
 
-func TestBuildEventsStage_NoDecisionNoCrash(t *testing.T) {
-	// Sent event with nil Decision should not panic — uses empty ConnectorID.
-	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-7"}, TenantID: "tenant-1"}
-	state := NewPipelineState(msg, "trace-stu")
-	state.SendResult = &SendResult{Success: true, ExternalID: "ext-123", Parts: 1}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
-
-	s := NewBuildEventsStage()
-	_, err := s.Process(context.Background(), state)
-	if err != nil {
-		t.Fatalf("unexpected error with nil Decision: %v", err)
-	}
-}
-
 func TestBuildEventsStage_TimeInjection(t *testing.T) {
 	fixedTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 	stage := &BuildEventsStage{now: func() time.Time { return fixedTime }}
 
 	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-8"}, TenantID: "tenant-1"}
 	state := NewPipelineState(msg, "trace-vwx")
-	state.SendResult = &SendResult{Success: true, ExternalID: "ext-321", Parts: 1}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status:     domain.MessageStatusSent,
+		ExternalID: "ext-321",
+		Parts:      1,
+	}
 
 	result, err := stage.Process(context.Background(), state)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if result.Events[0].OccurredAt != fixedTime {
-		t.Errorf("OccurredAt = %v, want %v", result.Events[0].OccurredAt, fixedTime)
+	if result.DomainEvents[0].OccurredAt != fixedTime {
+		t.Errorf("OccurredAt = %v, want %v", result.DomainEvents[0].OccurredAt, fixedTime)
+	}
+}
+
+func TestBuildEventsStage_ConnectorIDInSentEvent(t *testing.T) {
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-5"}, TenantID: "tenant-1"}
+	state := NewPipelineState(msg, "trace-mno")
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status:      domain.MessageStatusSent,
+		ExternalID:  "ext-777",
+		ConnectorID: "http-gateway-1",
+		Parts:       1,
+	}
+
+	s := NewBuildEventsStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.DomainEvents[0].EventType != events.EventTypeMessageSentV1 {
+		t.Error("expected sent event")
+	}
+}
+
+func TestBuildEventsStage_RetryableFlagInFailedEvent(t *testing.T) {
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-9"}, TenantID: "tenant-1", RetryCount: 3, MaxRetries: 3}
+	state := NewPipelineState(msg, "trace-xyz")
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status:       domain.MessageStatusFailed,
+		ExternalID:   "",
+		ErrorCode:    "500",
+		ErrorMessage: "overloaded",
+		Retryable:    true, // was retryable but exhausted
+	}
+
+	s := NewBuildEventsStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.DomainEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.DomainEvents))
+	}
+	if result.DomainEvents[0].EventType != events.EventTypeMessageFailedV1 {
+		t.Errorf("EventType = %q, want %q", result.DomainEvents[0].EventType, events.EventTypeMessageFailedV1)
 	}
 }

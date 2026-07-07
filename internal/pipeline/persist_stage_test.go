@@ -51,10 +51,6 @@ func (m *mockMessageRepo) Delete(_ context.Context, _ string) error {
 	return nil
 }
 
-func bm(id string, version int) domain.BaseModel {
-	return domain.BaseModel{ID: id, Version: version}
-}
-
 func TestPersistStage_Name(t *testing.T) {
 	s := NewPersistStage(&mockMessageRepo{})
 	if got := s.Name(); got != "persist" {
@@ -69,24 +65,12 @@ func TestPersistStage_MissingArtifacts(t *testing.T) {
 		err   error
 	}{
 		{"nil message", NewPipelineState(nil, "trace-1"), ErrPersistNoMessage},
-		{"nil send result", func() *PipelineState {
-			s := NewPipelineState(&domain.Message{BaseModel: bm("msg-1", 0)}, "trace-1")
-			s.Decision = &RoutingDecision{}
-			s.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
-			return s
-		}(), ErrPersistNoSendResult},
 		{"nil delivery outcome", func() *PipelineState {
-			s := NewPipelineState(&domain.Message{BaseModel: bm("msg-1", 0)}, "trace-1")
+			s := NewPipelineState(&domain.Message{BaseModel: domain.BaseModel{ID: "msg-1"}}, "trace-1")
 			s.SendResult = &SendResult{}
 			s.Decision = &RoutingDecision{}
 			return s
 		}(), ErrPersistNoDeliveryOutcome},
-		{"nil decision", func() *PipelineState {
-			s := NewPipelineState(&domain.Message{BaseModel: bm("msg-1", 0)}, "trace-1")
-			s.SendResult = &SendResult{}
-			s.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
-			return s
-		}(), ErrPersistNoDecision},
 	}
 
 	for _, tt := range tests {
@@ -100,24 +84,21 @@ func TestPersistStage_MissingArtifacts(t *testing.T) {
 	}
 }
 
-func TestPersistStage_Sent(t *testing.T) {
+func TestPersistStage_AllFieldsCopied(t *testing.T) {
 	repo := &mockMessageRepo{}
 	now := time.Now().UTC()
 
-	msg := &domain.Message{BaseModel: bm("msg-1", 3)}
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 3}}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{
-		Success:    true,
-		ExternalID: "ext-123",
-		Parts:      1,
-	}
-	state.Decision = &RoutingDecision{
-		ConnectorID: "http-1",
-		RouteID:     "route-1",
-	}
 	state.DeliveryOutcome = &DeliveryOutcome{
-		Status: domain.MessageStatusSent,
-		SentAt: &now,
+		Status:       domain.MessageStatusSent,
+		ExternalID:   "ext-123",
+		ConnectorID:  "http-1",
+		RouteID:      "route-1",
+		Parts:        2,
+		ErrorCode:    "0",
+		ErrorMessage: "ok",
+		SentAt:       &now,
 	}
 
 	s := NewPersistStage(repo)
@@ -141,29 +122,28 @@ func TestPersistStage_Sent(t *testing.T) {
 	if repo.updatedInput.ExternalID == nil || *repo.updatedInput.ExternalID != "ext-123" {
 		t.Errorf("ExternalID = %v, want ext-123", repo.updatedInput.ExternalID)
 	}
-	if repo.updatedInput.Parts == nil || *repo.updatedInput.Parts != 1 {
-		t.Errorf("Parts = %v, want 1", repo.updatedInput.Parts)
+	if repo.updatedInput.ConnectorID == nil || *repo.updatedInput.ConnectorID != "http-1" {
+		t.Errorf("ConnectorID = %v, want http-1", repo.updatedInput.ConnectorID)
 	}
-	// Timestamps copied directly from DeliveryOutcome
+	if repo.updatedInput.RouteID == nil || *repo.updatedInput.RouteID != "route-1" {
+		t.Errorf("RouteID = %v, want route-1", repo.updatedInput.RouteID)
+	}
+	if repo.updatedInput.Parts == nil || *repo.updatedInput.Parts != 2 {
+		t.Errorf("Parts = %v, want 2", repo.updatedInput.Parts)
+	}
 	if repo.updatedInput.SentAt == nil || !repo.updatedInput.SentAt.Equal(now) {
 		t.Errorf("SentAt = %v, want %v", repo.updatedInput.SentAt, now)
 	}
 }
 
-func TestPersistStage_Sent_NoExternalID(t *testing.T) {
+func TestPersistStage_EmptyStringsAsNil(t *testing.T) {
 	repo := &mockMessageRepo{}
 
-	msg := &domain.Message{BaseModel: bm("msg-1", 1)}
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 1}}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{
-		Success:    true,
-		ExternalID: "",
-		Parts:      1,
-	}
-	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
 	state.DeliveryOutcome = &DeliveryOutcome{
-		Status:      domain.MessageStatusSent,
-		AwaitingDLR: true,
+		Status: domain.MessageStatusSent,
+		// ExternalID, ErrorCode, ErrorMessage all empty
 	}
 
 	s := NewPersistStage(repo)
@@ -173,26 +153,28 @@ func TestPersistStage_Sent_NoExternalID(t *testing.T) {
 	}
 
 	if repo.updatedInput.ExternalID != nil {
-		t.Errorf("ExternalID = %v, want nil (no external ID)", *repo.updatedInput.ExternalID)
+		t.Errorf("ExternalID = %v, want nil for empty string", *repo.updatedInput.ExternalID)
+	}
+	if repo.updatedInput.ErrorCode != nil {
+		t.Errorf("ErrorCode = %v, want nil for empty string", *repo.updatedInput.ErrorCode)
+	}
+	if repo.updatedInput.ErrorMessage != nil {
+		t.Errorf("ErrorMessage = %v, want nil for empty string", *repo.updatedInput.ErrorMessage)
 	}
 }
 
-func TestPersistStage_Delivered(t *testing.T) {
+func TestPersistStage_DeliveredTimestamps(t *testing.T) {
 	repo := &mockMessageRepo{}
 	now := time.Now().UTC()
 
-	msg := &domain.Message{BaseModel: bm("msg-1", 2)}
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 2}}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{
-		Success:    true,
-		ExternalID: "ext-456",
-		Parts:      1,
-	}
-	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
 	state.DeliveryOutcome = &DeliveryOutcome{
-		Status:      domain.MessageStatusDelivered,
-		SentAt:      &now,
-		DeliveredAt: &now,
+		Status:       domain.MessageStatusDelivered,
+		ExternalID:   "ext-456",
+		Parts:        1,
+		SentAt:       &now,
+		DeliveredAt:  &now,
 	}
 
 	s := NewPersistStage(repo)
@@ -201,33 +183,26 @@ func TestPersistStage_Delivered(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if repo.updatedInput.DeliveredAt == nil {
-		t.Error("Expected DeliveredAt to be copied")
-	}
 	if repo.updatedInput.SentAt == nil {
 		t.Error("Expected SentAt to be copied")
 	}
+	if repo.updatedInput.DeliveredAt == nil {
+		t.Error("Expected DeliveredAt to be copied")
+	}
 }
 
-func TestPersistStage_Failed(t *testing.T) {
+func TestPersistStage_FailedTimestamps(t *testing.T) {
 	repo := &mockMessageRepo{}
 	now := time.Now().UTC()
 
-	msg := &domain.Message{BaseModel: bm("msg-1", 1)}
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 1}}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{
-		Success:      false,
-		ExternalID:   "",
+	state.DeliveryOutcome = &DeliveryOutcome{
+		Status:       domain.MessageStatusFailed,
 		ErrorCode:    "400",
 		ErrorMessage: "invalid destination",
-		Parts:        0,
-	}
-	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
-	state.DeliveryOutcome = &DeliveryOutcome{
-		Status:      domain.MessageStatusFailed,
-		FailureKind: FailurePermanent,
-		FailedAt:    &now,
-		SentAt:      &now,
+		FailedAt:     &now,
+		SentAt:       &now,
 	}
 
 	s := NewPersistStage(repo)
@@ -242,24 +217,21 @@ func TestPersistStage_Failed(t *testing.T) {
 	if repo.updatedInput.ErrorCode == nil || *repo.updatedInput.ErrorCode != "400" {
 		t.Errorf("ErrorCode = %v, want 400", repo.updatedInput.ErrorCode)
 	}
-	if repo.updatedInput.ErrorMessage == nil || *repo.updatedInput.ErrorMessage != "invalid destination" {
-		t.Errorf("ErrorMessage = %v, want invalid destination", repo.updatedInput.ErrorMessage)
-	}
 }
 
-func TestPersistStage_ExistingTimestampsCopied(t *testing.T) {
+func TestPersistStage_TimestampsCopiedVerbatim(t *testing.T) {
 	repo := &mockMessageRepo{}
 	sentAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	deliveredAt := time.Date(2025, 1, 1, 0, 5, 0, 0, time.UTC)
 
-	msg := &domain.Message{BaseModel: bm("msg-1", 5)}
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 5}}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{Success: true, ExternalID: "ext-789", Parts: 1}
-	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
 	state.DeliveryOutcome = &DeliveryOutcome{
-		Status:      domain.MessageStatusDelivered,
-		SentAt:      &sentAt,
-		DeliveredAt: &deliveredAt,
+		Status:       domain.MessageStatusDelivered,
+		ExternalID:   "ext-789",
+		Parts:        1,
+		SentAt:       &sentAt,
+		DeliveredAt:  &deliveredAt,
 	}
 
 	s := NewPersistStage(repo)
@@ -268,7 +240,6 @@ func TestPersistStage_ExistingTimestampsCopied(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Both timestamps are copied verbatim from DeliveryOutcome.
 	if repo.updatedInput.SentAt == nil || !repo.updatedInput.SentAt.Equal(sentAt) {
 		t.Errorf("SentAt = %v, want %v", repo.updatedInput.SentAt, sentAt)
 	}
@@ -277,39 +248,11 @@ func TestPersistStage_ExistingTimestampsCopied(t *testing.T) {
 	}
 }
 
-func TestPersistStage_ConnectorIDAndRouteID(t *testing.T) {
-	repo := &mockMessageRepo{}
-
-	msg := &domain.Message{BaseModel: bm("msg-1", 1)}
-	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{Success: true, ExternalID: "ext", Parts: 1}
-	state.Decision = &RoutingDecision{
-		ConnectorID: "smpp-1",
-		RouteID:     "route-premium",
-	}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
-
-	s := NewPersistStage(repo)
-	_, err := s.Process(context.Background(), state)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if repo.updatedInput.ConnectorID == nil || *repo.updatedInput.ConnectorID != "smpp-1" {
-		t.Errorf("ConnectorID = %v, want smpp-1", repo.updatedInput.ConnectorID)
-	}
-	if repo.updatedInput.RouteID == nil || *repo.updatedInput.RouteID != "route-premium" {
-		t.Errorf("RouteID = %v, want route-premium", repo.updatedInput.RouteID)
-	}
-}
-
 func TestPersistStage_RepositoryError(t *testing.T) {
 	repo := &mockMessageRepo{updateErr: ErrPersistUpdateFailed}
 
-	msg := &domain.Message{BaseModel: bm("msg-1", 1)}
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 1}}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{Success: true, ExternalID: "ext", Parts: 1}
-	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
 	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
 
 	s := NewPersistStage(repo)
@@ -319,20 +262,14 @@ func TestPersistStage_RepositoryError(t *testing.T) {
 	}
 }
 
-func TestPersistStage_VerifiesErrorMapping(t *testing.T) {
+func TestPersistStage_PriceAndCost(t *testing.T) {
 	repo := &mockMessageRepo{}
-	msg := &domain.Message{BaseModel: bm("msg-1", 1)}
+	price := int64(3500)
+	cost := int64(1500)
 
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 1}, Price: price, Cost: cost}
 	state := NewPipelineState(msg, "trace-1")
-	state.SendResult = &SendResult{
-		Success:      true,
-		ExternalID:   "ext-1",
-		ErrorCode:    "0",
-		ErrorMessage: "ok",
-		Parts:        2,
-	}
-	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
-	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent}
+	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent, ExternalID: "ext-1", Parts: 1}
 
 	s := NewPersistStage(repo)
 	_, err := s.Process(context.Background(), state)
@@ -340,10 +277,31 @@ func TestPersistStage_VerifiesErrorMapping(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if repo.updatedInput.ErrorCode == nil || *repo.updatedInput.ErrorCode != "0" {
-		t.Errorf("ErrorCode = %v, want 0", repo.updatedInput.ErrorCode)
+	if repo.updatedInput.Price == nil || *repo.updatedInput.Price != price {
+		t.Errorf("Price = %v, want %d", repo.updatedInput.Price, price)
 	}
-	if repo.updatedInput.Parts == nil || *repo.updatedInput.Parts != 2 {
-		t.Errorf("Parts = %v, want 2", repo.updatedInput.Parts)
+	if repo.updatedInput.Cost == nil || *repo.updatedInput.Cost != cost {
+		t.Errorf("Cost = %v, want %d", repo.updatedInput.Cost, cost)
+	}
+}
+
+func TestPersistStage_ZeroPriceNotPassed(t *testing.T) {
+	repo := &mockMessageRepo{}
+
+	msg := &domain.Message{BaseModel: domain.BaseModel{ID: "msg-1", Version: 1}, Price: 0, Cost: 0}
+	state := NewPipelineState(msg, "trace-1")
+	state.DeliveryOutcome = &DeliveryOutcome{Status: domain.MessageStatusSent, ExternalID: "ext-1", Parts: 1}
+
+	s := NewPersistStage(repo)
+	_, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if repo.updatedInput.Price != nil {
+		t.Error("expected Price to be nil (zero value)")
+	}
+	if repo.updatedInput.Cost != nil {
+		t.Error("expected Cost to be nil (zero value)")
 	}
 }

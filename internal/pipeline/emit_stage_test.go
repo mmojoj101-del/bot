@@ -34,12 +34,12 @@ func TestEmitStage_NilPublisher(t *testing.T) {
 	}
 }
 
-func TestEmitStage_PublishesAllEvents(t *testing.T) {
+func TestEmitStage_PublishesAllDomainEvents(t *testing.T) {
 	pub := &mockPublisher{}
 	s := NewEmitStage(pub)
 
 	state := NewPipelineState(nil, "trace-1")
-	state.Events = []events.EventEnvelope{
+	state.DomainEvents = []events.EventEnvelope{
 		{EventType: events.EventTypeMessageSentV1, TraceID: "trace-1"},
 		{EventType: events.EventTypeMessageDeliveredV1, TraceID: "trace-2"},
 	}
@@ -55,8 +55,8 @@ func TestEmitStage_PublishesAllEvents(t *testing.T) {
 	if pub.published[0].EventType != events.EventTypeMessageSentV1 {
 		t.Errorf("event[0].EventType = %q, want %q", pub.published[0].EventType, events.EventTypeMessageSentV1)
 	}
-	if result.Events != nil {
-		t.Error("expected Events to be cleared after publish")
+	if result.DomainEvents != nil {
+		t.Error("expected DomainEvents to be cleared after publish")
 	}
 }
 
@@ -65,7 +65,7 @@ func TestEmitStage_EmptyEventsNoOp(t *testing.T) {
 	s := NewEmitStage(pub)
 
 	state := NewPipelineState(nil, "trace-1")
-	state.Events = nil
+	state.DomainEvents = nil
 
 	_, err := s.Process(context.Background(), state)
 	if err != nil {
@@ -81,7 +81,7 @@ func TestEmitStage_PublishError(t *testing.T) {
 	s := NewEmitStage(pub)
 
 	state := NewPipelineState(nil, "trace-1")
-	state.Events = []events.EventEnvelope{
+	state.DomainEvents = []events.EventEnvelope{
 		{EventType: events.EventTypeMessageSentV1},
 	}
 

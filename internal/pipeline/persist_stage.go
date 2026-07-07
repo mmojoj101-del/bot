@@ -9,15 +9,13 @@ import (
 
 // PersistStage writes the pipeline results to the database.
 //
-// It is deliberately "dumb" — it reads the finalized artifacts
-// (SendResult + DeliveryOutcome + Decision) and copies their values
+// It is deliberately "dumb" — it copies DeliveryOutcome fields verbatim
 // into a single UPDATE. No business logic, no event publishing,
 // no retry decisions, no timestamp policy.
 //
-// Reads:   SendResult (transport metadata: ExternalID, Parts, ErrorCode)
-//          DeliveryOutcome (Status, timestamps — copied verbatim)
-//          Decision (ConnectorID, RouteID)
-//          Message (ID, Version)
+// Reads:   DeliveryOutcome (Status, ExternalID, ConnectorID, RouteID,
+//                            Parts, ErrorCode, ErrorMessage, timestamps)
+//          Message (ID, Version, Price, Cost)
 // Writes:  MessageRepository.UpdateStatus
 // Produces: nothing (terminal stage)
 type PersistStage struct {
@@ -36,64 +34,40 @@ func (s *PersistStage) Name() string {
 
 var (
 	ErrPersistNoMessage         = fmt.Errorf("persist stage: no message")
-	ErrPersistNoSendResult      = fmt.Errorf("persist stage: no send result")
 	ErrPersistNoDeliveryOutcome = fmt.Errorf("persist stage: no delivery outcome")
-	ErrPersistNoDecision        = fmt.Errorf("persist stage: no routing decision")
 	ErrPersistUpdateFailed      = fmt.Errorf("persist stage: update failed")
 )
 
-// Process writes artifacts to the database.
-// Timestamps are read from DeliveryOutcome — no status-aware logic here.
+// Process copies DeliveryOutcome fields to the database.
 func (s *PersistStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	if state.Message == nil {
 		return nil, ErrPersistNoMessage
 	}
-	if state.SendResult == nil {
-		return nil, ErrPersistNoSendResult
-	}
 	if state.DeliveryOutcome == nil {
 		return nil, ErrPersistNoDeliveryOutcome
 	}
-	if state.Decision == nil {
-		return nil, ErrPersistNoDecision
-	}
 
 	msg := state.Message
-	sr := state.SendResult
-	decision := state.Decision
 	delivery := state.DeliveryOutcome
 
-	// Build UpdateMessageInput — direct copy from state artifacts.
+	// Build UpdateMessageInput — direct copy from DeliveryOutcome.
 	status := string(delivery.Status)
 	input := domain.UpdateMessageInput{
 		Status:      (*domain.MessageStatus)(&status),
-		ConnectorID: &decision.ConnectorID,
-		RouteID:     &decision.RouteID,
-		Parts:       &sr.Parts,
+		ExternalID:  strPtr(delivery.ExternalID),
+		ConnectorID: strPtr(delivery.ConnectorID),
+		RouteID:     strPtr(delivery.RouteID),
+		Parts:       intPtr(delivery.Parts),
+		ErrorCode:   strPtr(delivery.ErrorCode),
+		ErrorMessage: strPtr(delivery.ErrorMessage),
 
 		// Timestamps — copied directly from DeliveryOutcome.
-		// HandleResultStage determines when each timestamp should be set.
 		SentAt:      delivery.SentAt,
 		DeliveredAt: delivery.DeliveredAt,
 		FailedAt:    delivery.FailedAt,
 	}
 
-	// ExternalID from provider (SendResult)
-	if sr.ExternalID != "" {
-		input.ExternalID = &sr.ExternalID
-	}
-
-	// Error details (provider status / error code)
-	if sr.ErrorCode != "" {
-		ec := sr.ErrorCode
-		input.ErrorCode = &ec
-	}
-	if sr.ErrorMessage != "" {
-		em := sr.ErrorMessage
-		input.ErrorMessage = &em
-	}
-
-	// Price/Cost from domain result — if available.
+	// Price/Cost from domain message — if available.
 	if msg.Price > 0 {
 		input.Price = &msg.Price
 	}
@@ -107,4 +81,15 @@ func (s *PersistStage) Process(ctx context.Context, state *PipelineState) (*Pipe
 	}
 
 	return state, nil
+}
+
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func intPtr(i int) *int {
+	return &i
 }

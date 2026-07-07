@@ -7,16 +7,14 @@ import (
 	"github.com/raghna/fury-sms-gateway/internal/domain/events"
 )
 
-// EmitStage publishes Events from PipelineState.
+// EmitStage publishes DomainEvents from PipelineState.
 //
 // It is deliberately "dumb":
 //   - Does NOT create events (BuildEventsStage does that)
 //   - Does NOT decide which events to publish
-//   - Does NOT handle retry, metrics, or business logic
-//   - Simply iterates Events and calls publisher.Publish()
+//   - Simply iterates DomainEvents and calls publisher.Publish()
 //
-// Reads:   PipelineState.Events
-// Writes:  nothing (side effect: publisher.Publish)
+// Reads:   PipelineState.DomainEvents
 // Produces: nothing (terminal stage)
 type EmitStage struct {
 	publisher events.DomainEventPublisher
@@ -34,21 +32,21 @@ func (s *EmitStage) Name() string {
 
 var ErrEmitEmptyPublisher = fmt.Errorf("emit stage: nil publisher")
 
-// Process publishes all Events in order.
+// Process publishes all DomainEvents in order.
 func (s *EmitStage) Process(ctx context.Context, state *PipelineState) (*PipelineState, error) {
 	if s.publisher == nil {
 		return nil, ErrEmitEmptyPublisher
 	}
 
-	for i := range state.Events {
-		if err := s.publisher.Publish(ctx, state.Events[i]); err != nil {
+	for i := range state.DomainEvents {
+		if err := s.publisher.Publish(ctx, state.DomainEvents[i]); err != nil {
 			return nil, fmt.Errorf("emit stage: publish event %q: %w",
-				state.Events[i].EventType, err)
+				state.DomainEvents[i].EventType, err)
 		}
 	}
 
 	// Clear the events list — published events are final.
-	state.Events = nil
+	state.DomainEvents = nil
 
 	return state, nil
 }

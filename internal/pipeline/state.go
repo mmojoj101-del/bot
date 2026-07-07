@@ -13,11 +13,11 @@ import (
 //
 // Artifact chain (each stage → one new artifact, immutable thereafter):
 //
-//	Message ──→ PreparedMessage ──→ RoutingDecision ──→ SendResult ──→ DeliveryOutcome ──→ Events
+//	Message ──→ PreparedMessage ──→ RoutingDecision ──→ SendResult ──→ DeliveryOutcome ──→ DomainEvents
 //	  (input)    PrepareStage          RouteStage         SendStage       HandleResultStage   BuildEventsStage
 //	                                                                     ├─ PersistStage (copies DeliveryOutcome to DB)
-//	                                                                     ├─ BuildEventsStage (builds events from state)
-//	                                                                     ├─ EmitStage (publishes Events)
+//	                                                                     ├─ BuildEventsStage (builds events from DeliveryOutcome + Message)
+//	                                                                     ├─ EmitStage (publishes DomainEvents)
 //	                                                                     └─ RetryDecorator (schedules retry)
 type PipelineState struct {
 	// Message is the canonical domain message being processed. Immutable in the pipeline.
@@ -28,21 +28,23 @@ type PipelineState struct {
 	Prepared *domain.PreparedMessage
 
 	// Decision is the routing decision set by RouteStage (nil = undecided).
-	// No stage modifies it after RouteStage sets it.
+	// HandleResultStage reads it to copy ConnectorID/RouteID to DeliveryOutcome.
+	// After HandleResultStage, no one reads Decision directly.
 	Decision *RoutingDecision
 
 	// SendResult is the result from the connector (set by SendStage, nil = not sent).
-	// Immutable after SendStage — subsequent stages read but never modify it.
+	// HandleResultStage is the LAST consumer of SendResult.
+	// After HandleResultStage maps it to DeliveryOutcome, SendResult is ignored.
 	SendResult *SendResult
 
-	// DeliveryOutcome is the business interpretation of SendResult
-	// (set by HandleResultStage). PersistStage, BuildEventsStage, and
-	// RetryDecorator read it; none modifies it.
+	// DeliveryOutcome is the business interpretation of SendResult.
+	// Produced by HandleResultStage — self-contained, carries everything
+	// needed by subsequent stages (PersistStage, BuildEventsStage, RetryDecorator).
 	DeliveryOutcome *DeliveryOutcome
 
-	// Events is an ordered list of domain events produced by BuildEventsStage.
+	// DomainEvents is an ordered list of domain events produced by BuildEventsStage.
 	// EmitStage publishes them (and nothing else).
-	Events []events.EventEnvelope
+	DomainEvents []events.EventEnvelope
 
 	// TraceID is the cross-lifecycle trace identifier.
 	TraceID string
@@ -66,6 +68,8 @@ type RoutingDecision struct {
 type PreparedMessage = domain.PreparedMessage
 
 // SendResult is the output from a Connector.Send() call.
+// HandleResultStage is the LAST consumer. After it maps SendResult to
+// DeliveryOutcome, no subsequent stage reads SendResult.
 type SendResult struct {
 	Success      bool
 	ExternalID   string // provider-side message ID
@@ -101,15 +105,17 @@ const (
 
 // DeliveryOutcome is the business interpretation of a SendResult.
 // Produced by HandleResultStage — pure logic, no DB, no event bus.
-// Every subsequent stage reads it; none modifies it.
+// It is SELF-CONTAINED: everything downstream needs is in this struct.
+//
+// After HandleResultStage, no stage reads SendResult or Decision directly.
+// PersistStage copies DeliveryOutcome fields to DB.
+// BuildEventsStage builds domain events from DeliveryOutcome + Message.
 //
 // Timestamps are set by HandleResultStage based on Status semantics:
 //
 //	Sent/Delivered → SentAt = now
 //	Delivered      → DeliveredAt = now
 //	Failed         → FailedAt = now, SentAt = now (retroactive if never sent)
-//
-// PersistStage copies them directly — no timestamp policy in the DB layer.
 //
 // Terminality is derived via IsTerminal().
 // Sent is ambiguous: AwaitingDLR=true → non-terminal, false → terminal.
@@ -120,21 +126,35 @@ type DeliveryOutcome struct {
 	// FailureKind classifies the cause. Empty = success.
 	FailureKind FailureKind
 
+	// Reason is a human-readable explanation (e.g., "provider returned 500").
+	Reason string
+
 	// AwaitingDLR is true only when Status=Sent and DLR is expected.
 	// This is the only case where Sent is non-terminal.
 	AwaitingDLR bool
 
-	// Reason is a human-readable explanation (e.g., "provider returned 500").
-	Reason string
+	// Retryable is true if the connector indicated this error was retryable.
+	// Copied from SendResult so BuildEventsStage doesn't need SendResult.
+	Retryable bool
 
-	// Timestamps — set by HandleResultStage based on status transition.
+	// --- Artifacts from SendResult — carried forward from SendResult/Decision ---
+	// These are populated by HandleResultStage so downstream stages
+	// (PersistStage, BuildEventsStage) don't need to read SendResult or Decision.
+	ExternalID   string `json:"external_id"`    // provider-side message ID
+	ConnectorID  string `json:"connector_id"`   // from RoutingDecision
+	RouteID      string `json:"route_id"`       // from RoutingDecision
+	Parts        int    `json:"parts"`          // message part count
+	ErrorCode    string `json:"error_code"`     // provider error code
+	ErrorMessage string `json:"error_message"`  // provider error message
+
+	// --- Timestamps ---
 	SentAt      *time.Time
 	DeliveredAt *time.Time
 	FailedAt    *time.Time
 }
 
 // NewDeliveryOutcome creates a DeliveryOutcome with validated fields.
-func NewDeliveryOutcome(status domain.MessageStatus, failureKind FailureKind, awaitingDLR bool, reason string, timestamps ...*time.Time) DeliveryOutcome {
+func NewDeliveryOutcome(status domain.MessageStatus, failureKind FailureKind, awaitingDLR bool, reason string) DeliveryOutcome {
 	return DeliveryOutcome{
 		Status:      status,
 		FailureKind: failureKind,

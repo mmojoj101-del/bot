@@ -29,10 +29,11 @@ func TestHandleResultStage_NilSendResult(t *testing.T) {
 
 func TestHandleResultStage_AcceptanceFinal(t *testing.T) {
 	state := NewPipelineState(&domain.Message{}, "trace-1")
+	state.Decision = &RoutingDecision{ConnectorID: "http-1", RouteID: "route-1"}
 	state.SendResult = &SendResult{
 		Success:    true,
 		ExternalID: "ext-123",
-		Parts:      1,
+		Parts:      2,
 		Acceptance: domain.AcceptanceFinal,
 	}
 
@@ -51,6 +52,21 @@ func TestHandleResultStage_AcceptanceFinal(t *testing.T) {
 	if result.DeliveryOutcome.FailureKind != FailureNone {
 		t.Errorf("FailureKind = %q, want %q", result.DeliveryOutcome.FailureKind, FailureNone)
 	}
+	// Verify SendResult fields are copied into DeliveryOutcome
+	if result.DeliveryOutcome.ExternalID != "ext-123" {
+		t.Errorf("ExternalID = %q, want ext-123", result.DeliveryOutcome.ExternalID)
+	}
+	if result.DeliveryOutcome.Parts != 2 {
+		t.Errorf("Parts = %d, want 2", result.DeliveryOutcome.Parts)
+	}
+	// Verify Decision fields are copied
+	if result.DeliveryOutcome.ConnectorID != "http-1" {
+		t.Errorf("ConnectorID = %q, want http-1", result.DeliveryOutcome.ConnectorID)
+	}
+	if result.DeliveryOutcome.RouteID != "route-1" {
+		t.Errorf("RouteID = %q, want route-1", result.DeliveryOutcome.RouteID)
+	}
+	// Timestamps
 	if result.DeliveryOutcome.SentAt == nil {
 		t.Error("expected SentAt to be set for final acceptance")
 	}
@@ -82,6 +98,9 @@ func TestHandleResultStage_AcceptanceFinal_NoExternalID(t *testing.T) {
 	}
 	if !result.DeliveryOutcome.IsTerminal() {
 		t.Error("expected IsTerminal() = true (no DLR, terminal)")
+	}
+	if result.DeliveryOutcome.ExternalID != "" {
+		t.Errorf("ExternalID = %q, want empty", result.DeliveryOutcome.ExternalID)
 	}
 	if result.DeliveryOutcome.SentAt == nil {
 		t.Error("expected SentAt to be set")
@@ -155,6 +174,16 @@ func TestHandleResultStage_Rejected_Failed(t *testing.T) {
 	if result.DeliveryOutcome.SentAt == nil {
 		t.Error("expected SentAt to be set retroactively on failure")
 	}
+	// Error details copied
+	if result.DeliveryOutcome.ErrorCode != "400" {
+		t.Errorf("ErrorCode = %q, want 400", result.DeliveryOutcome.ErrorCode)
+	}
+	if result.DeliveryOutcome.ErrorMessage != "invalid destination" {
+		t.Errorf("ErrorMessage = %q, want invalid destination", result.DeliveryOutcome.ErrorMessage)
+	}
+	if result.DeliveryOutcome.Retryable != false {
+		t.Error("Expected Retryable = false")
+	}
 }
 
 func TestHandleResultStage_Rejected_Retrying(t *testing.T) {
@@ -193,6 +222,10 @@ func TestHandleResultStage_Rejected_Retrying(t *testing.T) {
 	if result.DeliveryOutcome.FailedAt != nil {
 		t.Error("expected no FailedAt on retry")
 	}
+	// Retryable flag copied from SendResult
+	if result.DeliveryOutcome.Retryable != true {
+		t.Error("Expected Retryable = true")
+	}
 }
 
 func TestHandleResultStage_Rejected_RetryExhausted(t *testing.T) {
@@ -226,6 +259,10 @@ func TestHandleResultStage_Rejected_RetryExhausted(t *testing.T) {
 	}
 	if result.DeliveryOutcome.SentAt == nil {
 		t.Error("expected SentAt to be set retroactively")
+	}
+	// Error was retryable, but we exhausted retries
+	if result.DeliveryOutcome.Retryable != true {
+		t.Error("Expected Retryable = true (connector said retryable, but budget exhausted)")
 	}
 }
 
@@ -296,10 +333,31 @@ func TestHandleResultStage_PreservesPriorArtifacts(t *testing.T) {
 	}
 }
 
+func TestHandleResultStage_NoDecision_NoPanic(t *testing.T) {
+	state := NewPipelineState(&domain.Message{}, "trace-1")
+	state.SendResult = &SendResult{
+		Success:    true,
+		ExternalID: "ext-1",
+		Parts:      1,
+		Acceptance: domain.AcceptanceFinal,
+	}
+
+	s := NewHandleResultStage()
+	result, err := s.Process(context.Background(), state)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// ConnectorID/RouteID should be empty (nil Decision)
+	if result.DeliveryOutcome.ConnectorID != "" {
+		t.Errorf("ConnectorID = %q, want empty", result.DeliveryOutcome.ConnectorID)
+	}
+	if result.DeliveryOutcome.RouteID != "" {
+		t.Errorf("RouteID = %q, want empty", result.DeliveryOutcome.RouteID)
+	}
+}
+
 func TestHandleResultStage_SentAt_NotOverwritten(t *testing.T) {
-	// HandleResultStage always sets SentAt for sent/failed outcomes.
-	// The COALESCE in the DB query prevents overwriting existing timestamps.
-	// This test verifies the stage itself doesn't preserve old timestamps.
 	now := time.Now().UTC()
 	msg := &domain.Message{SentAt: &now}
 	state := NewPipelineState(msg, "trace-1")
@@ -316,8 +374,7 @@ func TestHandleResultStage_SentAt_NotOverwritten(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// SentAt is always set by HandleResultStage for Final acceptance.
-	// We only verify it's set (not nil) — the COALESCE handles overwrite protection.
+	// HandleResultStage always sets SentAt for Final — COALESCE protects over-write.
 	if result.DeliveryOutcome.SentAt == nil {
 		t.Error("expected SentAt to be set")
 	}
