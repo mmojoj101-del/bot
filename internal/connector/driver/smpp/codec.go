@@ -92,6 +92,9 @@ func (c *Codec) Decode(data []byte) (PDU, error) {
 	if int(hdr.Length) > len(data) {
 		return nil, fmt.Errorf("%w: header claims %d bytes, got %d", ErrTruncatedBody, hdr.Length, len(data))
 	}
+	if hdr.Length < 16 {
+		return nil, fmt.Errorf("%w: header length %d is less than minimum 16", ErrTruncatedBody, hdr.Length)
+	}
 
 	body := data[16:hdr.Length]
 	decoder, ok := c.decoders[hdr.CommandID]
