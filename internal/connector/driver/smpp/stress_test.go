@@ -316,28 +316,28 @@ func TestStress_SubmitSM_RoundTrip(t *testing.T) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 100)
 
-	pdu := &SubmitSM{
-		Hdr:             Header{CommandID: CommandIDSubmitSM},
-		ServiceType:     "stress",
-		SourceAddrTON:   0x01,
-		SourceAddrNPI:   0x01,
-		SourceAddr:      "1234567890",
-		DestAddrTON:     0x01,
-		DestAddrNPI:     0x01,
-		DestinationAddr: "9876543210",
-		ShortMessage:    []byte("Stress test message for SMPP production readiness verification."),
-	}
-
 	t.Logf("sending %d SubmitSM (window=%d, loss=%.1f%%, dupe=%.1f%%, ooo=%.1f%%, err=%.1f%%)",
 		cfg.Iterations, cfg.WindowSize, cfg.LossRate*100, cfg.DupeRate*100, cfg.OOORate*100, cfg.ErrorRate*100)
 
 	ts := time.Now()
+	// Create a fresh PDU per call (SendRequest mutates the PDU's seq in-place)
 	for i := 0; i < cfg.Iterations; i++ {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+			pdu := &SubmitSM{
+				Hdr:             Header{CommandID: CommandIDSubmitSM},
+				ServiceType:     "stress",
+				SourceAddrTON:   0x01,
+				SourceAddrNPI:   0x01,
+				SourceAddr:      "1234567890",
+				DestAddrTON:     0x01,
+				DestAddrNPI:     0x01,
+				DestinationAddr: "9876543210",
+				ShortMessage:    []byte("Stress test message for SMPP production readiness."),
+			}
 			reqCtx, reqCancel := context.WithTimeout(ctx, 15*time.Second)
 			defer reqCancel()
 			if _, err := s.SendRequest(reqCtx, pdu); err != nil {

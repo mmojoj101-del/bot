@@ -79,12 +79,14 @@ func TestHeartbeat_ResponseCompletes(t *testing.T) {
 		Interval: 5 * time.Millisecond,
 		OnError: func(err error) {
 			callCount.Add(1)
-			t.Logf("heartbeat error: %v", err)
 		},
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go hb.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+	})
 
 	// First heartbeat
 	select {
@@ -142,12 +144,12 @@ func TestHeartbeat_OnErrorCallback(t *testing.T) {
 		Timeout:  50 * time.Millisecond,
 		OnError: func(err error) {
 			errCount.Add(1)
-			t.Logf("heartbeat error (expected): %v", err)
 		},
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go hb.Start(ctx)
+	t.Cleanup(func() { cancel() })
 
 	// First heartbeat
 	select {

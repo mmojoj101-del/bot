@@ -253,6 +253,12 @@ func (s *Session) Connect(ctx context.Context, addr string, bindPDU *BindTransce
 //   - tcpTransport.WritePDU is mutex-protected
 //   - This goroutine is NOT the Reader goroutine (no blocking concern)
 //   - WriteQueue is ONLY for handler responses (Reader goroutine path)
+// SendRequest sends a PDU and waits for its response.
+//
+// Sequence number is set on the PDU during encoding (WindowManager owns seq).
+// The PDU pointer is MUTATED during this call — the caller must NOT reuse the
+// same PDU pointer concurrently across multiple SendRequest calls.
+// Create a fresh PDU per call, or ensure exclusive access.
 func (s *Session) SendRequest(ctx context.Context, pdu PDU) (PDU, error) {
 	// Quick state check (non-blocking, best-effort)
 	s.mu.Lock()

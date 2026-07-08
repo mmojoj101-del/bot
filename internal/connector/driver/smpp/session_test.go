@@ -447,48 +447,43 @@ func TestSession_ParallelSendRequest_WindowLimit(t *testing.T) {
 
 	const count = 12 // > window size (5), validates window serialization
 	errCh := make(chan error, count)
-	pdu := &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}}
 
-	// Launch 12 parallel SendRequests
+	// Launch 12 parallel SendRequests (each goroutine creates its own PDU;
+	// SendRequest mutates the PDU's seq in-place, so sharing is a data race)
 	for i := 0; i < count; i++ {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			pdu := &EnquireLink{Hdr: Header{CommandID: CommandIDEnquireLink}}
 			_, err := s.SendRequest(ctx, pdu)
 			errCh <- err
 		}()
 	}
 
-	// Interleave: drain batch of writes → send batch of responses
-	// Window = 5, so at most 5 writes happen before responses are needed
-	batchSize := 4
+	// Interleave: drain writes → decode seq → send matching response
+	// We MUST decode the written PDU to get the actual seq (window slot allocates
+	// seq atomically — the order is not deterministic).
 	totalDrained := 0
-	totalResponses := 0
 
-	for totalResponses < count {
-		// Drain up to batchSize writes
-		drained := 0
-		for drained < batchSize && totalDrained < count {
-			select {
-			case <-ft.writeCh:
-				drained++
-				totalDrained++
-			case <-time.After(2 * time.Second):
-				t.Fatalf("timed out waiting for write %d/%d (drained=%d)",
-					totalDrained+1, count, totalDrained)
+	for totalDrained < count {
+		// Drain 1 write, decode its seq, respond with that seq
+		// By doing one at a time we keep the window predictable.
+		select {
+		case data := <-ft.writeCh:
+			totalDrained++
+			// Decode the written PDU to get its seq
+			req, err := s.codec.Decode(data)
+			if err != nil {
+				t.Fatalf("decode written PDU: %v", err)
 			}
-		}
-
-		// Send responses for drained writes
-		// We don't know the exact seq numbers allocated, but they start at 1
-		for i := 0; i < drained; i++ {
-			seq := uint32(totalResponses + 1) // sequential starting at 1
+			seq := req.Header().SequenceNumber
 			resp := &EnquireLinkResp{
 				Hdr: Header{CommandID: CommandIDEnquireLinkResp, SequenceNumber: seq, CommandStatus: StatusOK},
 			}
-			data, _ := s.codec.Encode(resp)
-			ft.readCh <- data
-			totalResponses++
+			respData, _ := s.codec.Encode(resp)
+			ft.readCh <- respData
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for write %d/%d", totalDrained+1, count)
 		}
 	}
 
