@@ -1164,7 +1164,7 @@ def shopify_checker():
             "Response": clean_response,
             "CC": cc_string,
             "Price": f"${price}" if price and price != '0.00' else '-',
-            "Gate": gateway,
+            "Gateway": gateway,
             "Site": site,
             "Charged": "True" if is_charged else "False",
             "Approved": "True" if is_approved else "False",
