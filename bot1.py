@@ -1093,7 +1093,17 @@ def shopify_checker():
         
         # Determine Charged/Approved status
         is_charged = success and clean_response in ['ORDER_PLACED', 'PAYMENTS_SHOPIFY_PAYMENTS']
-        is_approved = success and not is_charged and clean_response not in ['SITE_ERROR', 'SITE_BUSY', 'SITE_BLOCKED']
+        
+        # Approved = Live card (rejected by bank, not by site)
+        APPROVED_RESPONSES = [
+            'INSUFFICIENT_FUNDS', 'INCORRECT_CVV', 'INCORRECT_CVC',
+            'CARD_EXPIRED', 'CARD_BLOCKED', 'FRAUD_SUSPECTED',
+            'OTP_REQUIRED', '3D_SECURE_REQUIRED', 'VERIFICATION_REQUIRED',
+            'DO_NOT_HONOR', 'TRANSACTION_NOT_PERMITTED',
+            'EXCEEDS_WITHDRAWAL_LIMIT', 'INVALID_TRANSACTION',
+            'RESTRICTED_CARD', 'STOP_LOSS_ORDER'
+        ]
+        is_approved = success and not is_charged and clean_response in APPROVED_RESPONSES
         
         response_data = {
             "Response": clean_response,
