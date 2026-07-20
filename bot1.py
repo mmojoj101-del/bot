@@ -241,6 +241,14 @@ def extract_clean_response(message):
         'Seller proposal is null': 'SITE_ERROR',
         'Failed to get session token': 'SITE_ERROR',
         'Failed to parse proposal response': 'SITE_ERROR',
+        '3d': '3DS_REQUIRED',
+        '3d secure': '3DS_REQUIRED',
+        'otp': 'OTP_REQUIRED',
+        'insufficient': 'INSUFFICIENT_FUNDS',
+        'incorrect zip': 'INCORRECT_ZIP',
+        'incorrect cvv': 'INCORRECT_CVV',
+        'incorrect cvc': 'INCORRECT_CVC',
+        'expired': 'CARD_EXPIRED',
     }
     
     # Check if message is in error mapping
@@ -259,6 +267,12 @@ def extract_clean_response(message):
         return 'INCORRECT_CVV'
     if 'expired' in msg_lower:
         return 'CARD_EXPIRED'
+    if '3d' in msg_lower or '3ds' in msg_lower:
+        return '3DS_REQUIRED'
+    if 'otp' in msg_lower:
+        return 'OTP_REQUIRED'
+    if 'zip' in msg_lower or 'postal' in msg_lower:
+        return 'INCORRECT_ZIP'
     if 'blocked' in msg_lower or 'restricted' in msg_lower:
         return 'CARD_BLOCKED'
     if 'fraud' in msg_lower:
@@ -1092,16 +1106,17 @@ def shopify_checker():
         clean_response = extract_clean_response(message)
         
         # Determine Charged/Approved status
-        is_charged = success and clean_response in ['ORDER_PLACED', 'PAYMENTS_SHOPIFY_PAYMENTS']
+        is_charged = success and clean_response == 'ORDER_PLACED'
         
         # Approved = Live card (rejected by bank, not by site)
         APPROVED_RESPONSES = [
-            'INSUFFICIENT_FUNDS', 'INCORRECT_CVV', 'INCORRECT_CVC',
-            'CARD_EXPIRED', 'CARD_BLOCKED', 'FRAUD_SUSPECTED',
-            'OTP_REQUIRED', '3D_SECURE_REQUIRED', 'VERIFICATION_REQUIRED',
-            'DO_NOT_HONOR', 'TRANSACTION_NOT_PERMITTED',
-            'EXCEEDS_WITHDRAWAL_LIMIT', 'INVALID_TRANSACTION',
-            'RESTRICTED_CARD', 'STOP_LOSS_ORDER'
+            '3DS_REQUIRED',
+            'INSUFFICIENT_FUNDS', 
+            'INCORRECT_ZIP',
+            'INCORRECT_CVV',
+            'INCORRECT_CVC',
+            'CARD_EXPIRED',
+            'OTP_REQUIRED'
         ]
         is_approved = success and not is_charged and clean_response in APPROVED_RESPONSES
         
