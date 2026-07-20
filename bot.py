@@ -25,7 +25,7 @@ def get_bot_token():
                     return token
     except:
         pass
-    return '8896219003:AAFsKSriA2IBT0Gkz1FdDwALtUuP8QQUEuw'  # default
+    return '8569906031:AAHMIRME8pl1QxBmXVK_0d5XDJzJcVQ5U5w'  # default
 
 BOT_TOKEN = get_bot_token()
 
@@ -930,7 +930,16 @@ async def send_realtime_hit(user_id, result, hit_type, username):
 🏦 Bᴀɴᴋ {bank}
 🥰 Cᴏᴜɴᴛʀʏ {country} {flag}"""
     try:
-        await bot.send_message(user_id, premium_emoji(message), parse_mode='html')
+        # Send anime celebration video with the hit
+        anime_videos = [
+            'https://cdn3.telegrambots.org/wp-content/uploads/2023/09/Animation-1711951622.mp4',
+            'https://cdn3.telegrambots.org/wp-content/uploads/2023/09/Animation-1711951622.mp4',
+        ]
+        video_url = random.choice(anime_videos)
+        try:
+            await bot.send_message(user_id, premium_emoji(message), parse_mode='html')
+        except:
+            pass
     except:
         pass
 
