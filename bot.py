@@ -121,6 +121,11 @@ def clear_session():
             os.remove(f'{session_file}{ext}')
         except:
             pass
+    # Also try to remove from /tmp if exists
+    try:
+        os.remove(f'/tmp/{session_file}')
+    except:
+        pass
     print('[!] Session files cleared')
 
 def start_bot():
