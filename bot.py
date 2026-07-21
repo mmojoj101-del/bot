@@ -103,8 +103,19 @@ HITS_CHANNEL_ID = -1003942173333
 
 import subprocess
 
+def clear_session():
+    session_file = 'checker_bot.session'
+    for ext in ['', '-journal', '-shm', '-wal']:
+        try:
+            os.remove(f'{session_file}{ext}')
+        except:
+            pass
+    print('[!] Session files cleared')
+
 def start_bot():
     session_file = 'checker_bot.session'
+    # Always clear session on start to avoid ID mismatch
+    clear_session()
     try:
         _bot = TelegramClient('checker_bot', API_ID, API_HASH)
         _bot.start(bot_token=BOT_TOKEN)
@@ -112,12 +123,8 @@ def start_bot():
     except Exception as e:
         err = str(e).lower()
         if 'session' in err or 'wrong session' in err or 'security error' in err:
-            print(f'[!] Session error detected, clearing session...')
-            for ext in ['', '-journal']:
-                try:
-                    os.remove(f'{session_file}{ext}')
-                except:
-                    pass
+            print(f'[!] Session error detected, clearing and retrying...')
+            clear_session()
             _bot = TelegramClient('checker_bot', API_ID, API_HASH)
             _bot.start(bot_token=BOT_TOKEN)
             return _bot
