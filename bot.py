@@ -14,6 +14,17 @@ from datetime import datetime, timedelta
 API_ID = 30598540
 API_HASH = '067ae5148b522f3dc9f8ff06df7cab66'
 
+# Shared HTTP session to prevent connection leak
+_http_session = None
+
+async def get_http_session():
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        timeout = aiohttp.ClientTimeout(total=100)
+        connector = aiohttp.TCPConnector(limit=100, limit_per_host=20, enable_cleanup_closed=True)
+        _http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+    return _http_session
+
 # Read token from file (auto-updated by token-changer)
 def get_bot_token():
     token_file = '/root/bot_token.txt'
@@ -637,7 +648,7 @@ async def get_bin_info(card_number):
     try:
         bin_number = card_number[:6]
         timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get(f'https://bins.antipublic.cc/bins/{bin_number}') as res:
                 if res.status != 200:
                     return '-', '-', '-', '-', '-', ''
@@ -734,7 +745,7 @@ async def check_card(card, site, proxy):
         if proxy_str:
             url += f'&proxy={proxy_str}'
         timeout = aiohttp.ClientTimeout(total=100)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return {'status': 'Site Error', 'message': f'HTTP {resp.status}', 'card': card, 'retry': True}
@@ -822,7 +833,7 @@ async def check_card_stripe_charge(card, proxy=None, site=None):
                     ip, port, user, password = parts
                     proxy_str = f"{ip}:{port}:{user}:{password}"
             url += f"&proxy={proxy_str}"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        async with (await get_http_session()) as session:
             async with session.get(url) as resp:
                 response_text = await resp.text()
         try:
@@ -858,7 +869,7 @@ async def check_card_stripe_charge(card, proxy=None, site=None):
 async def check_card_vbv(card):
     try:
         url = f"{VBV_API_URL}?cc={card}"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        async with (await get_http_session()) as session:
             async with session.get(url) as resp:
                 response_text = await resp.text()
         try:
@@ -905,7 +916,7 @@ async def test_site_with_price(site, proxy):
         if proxy_str:
             url += f'&proxy={proxy_str}'
         timeout = aiohttp.ClientTimeout(total=60)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return {'site': site, 'status': 'dead', 'price': 0.0}
@@ -937,7 +948,7 @@ async def test_proxy(proxy):
         else:
             proxy_url = f'http://{proxy}'
         timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get('https://www.shopify.com', proxy=proxy_url) as res:
                 if res.status == 200:
                     return {'proxy': proxy, 'status': 'alive'}
@@ -3657,7 +3668,7 @@ async def bin_lookup(event):
     
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get(f'https://bins.antipublic.cc/bins/{bin_number}') as res:
                 if res.status != 200:
                     await status_msg.edit(premium_emoji(f"❌ BIN <code>{bin_number}</code> Nᴏᴛ Fᴏᴜɴᴅ!"), parse_mode='html')
@@ -3863,7 +3874,7 @@ Exᴀᴍᴘʟᴇs:
         data = {"key": key}
         
         timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.post("https://api.stripe.com/v1/payment_methods", headers=headers, data=data) as resp:
                 status_code = resp.status
                 elapsed_ms = round((time.time() - t0) * 1000)
@@ -3965,7 +3976,7 @@ Exᴀᴍᴘʟᴇs:
         }
         
         timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get(url, headers=headers, ssl=False, allow_redirects=True) as resp:
                 html = await resp.text()
                 final_url = str(resp.url)
@@ -4134,7 +4145,7 @@ Exᴀᴍᴘʟᴇs:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with (await get_http_session()) as session:
             # استخدام api.namefake.com مع البارامتر المناسب
             async with session.get(f"https://api.namefake.com/{country_param}/") as resp:
                 if resp.status != 200:
@@ -4281,7 +4292,7 @@ Exᴀᴍᴘʟᴇs:
     
     try:
         timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get(f"https://ipinfo.io/{ip_address}/json") as resp:
                 if resp.status != 200:
                     await status_msg.edit(premium_emoji(f"❌ Fᴀɪʟᴇᴅ ᴛᴏ ʟᴏᴏᴋ ᴜᴘ <code>{ip_address}</code>"), parse_mode='html')
@@ -4380,7 +4391,7 @@ Exᴀᴍᴘʟᴇs:
     
     try:
         timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with (await get_http_session()) as session:
             async with session.get(f"https://openiban.com/validate/{iban}?getBIC=true&validateBankCode=true") as resp:
                 if resp.status != 200:
                     await status_msg.edit(premium_emoji("❌ Gᴇɴᴇʀᴀʟ Sᴇʀᴠᴇʀ Eʀʀᴏʀ!"), parse_mode='html')
