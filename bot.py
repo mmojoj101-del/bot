@@ -4435,7 +4435,10 @@ async def stop_handler(event):
     if session_key in active_sessions:
         del active_sessions[session_key]
         await event.answer(" Sᴛᴏᴘᴘᴇᴅ", alert=True)
-        await event.edit(premium_emoji("🛑 Cʜᴇᴄᴋɪɴɢ sᴛᴏᴘᴘᴇᴅ ʙʏ ᴜsᴇʀ."), parse_mode='html')
+        try:
+            await event.edit(premium_emoji("🛑 Cʜᴇᴄᴋɪɴɢ sᴛᴏᴘᴘᴇᴅ ʙʏ ᴜsᴇʀ."), parse_mode='html')
+        except:
+            pass
 
 print("✅ Bᴏᴛ sᴛᴀʀᴛᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ!")
 
