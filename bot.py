@@ -25,7 +25,7 @@ def get_bot_token():
                     return token
     except:
         pass
-    return '8896219003:AAFsKSriA2IBT0Gkz1FdDwALtUuP8QQUEuw'  # default
+    return '8569906031:AAHMIRME8pl1QxBmXVK_0d5XDJzJcVQ5U5w'  # default
 
 BOT_TOKEN = get_bot_token()
 
@@ -101,7 +101,29 @@ STARS_FILE = "stars.json"
 DAILY_STARS = 100
 HITS_CHANNEL_ID = -1003942173333
 
-bot = TelegramClient('checker_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+import subprocess
+
+def start_bot():
+    session_file = 'checker_bot.session'
+    try:
+        _bot = TelegramClient('checker_bot', API_ID, API_HASH)
+        _bot.start(bot_token=BOT_TOKEN)
+        return _bot
+    except Exception as e:
+        err = str(e).lower()
+        if 'session' in err or 'wrong session' in err or 'security error' in err:
+            print(f'[!] Session error detected, clearing session...')
+            for ext in ['', '-journal']:
+                try:
+                    os.remove(f'{session_file}{ext}')
+                except:
+                    pass
+            _bot = TelegramClient('checker_bot', API_ID, API_HASH)
+            _bot.start(bot_token=BOT_TOKEN)
+            return _bot
+        raise e
+
+bot = start_bot()
 
 # Token checker - auto-reconnect when token changes
 LAST_TOKEN = BOT_TOKEN
@@ -124,6 +146,13 @@ async def restart_bot():
         await bot.disconnect()
     except:
         pass
+    # Clear session on restart to avoid session ID mismatch
+    session_file = 'checker_bot.session'
+    for ext in ['', '-journal']:
+        try:
+            os.remove(f'{session_file}{ext}')
+        except:
+            pass
     try:
         LAST_TOKEN = get_bot_token()
         bot = TelegramClient('checker_bot', API_ID, API_HASH)
