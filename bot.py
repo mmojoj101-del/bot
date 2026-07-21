@@ -36,7 +36,7 @@ def get_bot_token():
                     return token
     except:
         pass
-    return '8569906031:AAHMIRME8pl1QxBmXVK_0d5XDJzJcVQ5U5w'  # default
+    return '8896219003:AAFsKSriA2IBT0Gkz1FdDwALtUuP8QQUEuw'  # default
 
 BOT_TOKEN = get_bot_token()
 
