@@ -61,10 +61,7 @@ ADMIN_ID = [8987165792,7671957436]
 
 # Shopify APIs - load balanced
 SHOPIFY_APIS = [
-    'http://187.124.38.173:8002/3ltz-xK9qPm2r',               # Best
-    'http://72.61.178.178:8001/3ltz-xK9qPm2r',                 # Top2
-    'http://72.61.178.178:8002/3ltz-xK9qPm2r',                 # Top3
-    'https://shimmering-celebration-production-7dd0.up.railway.app/shopify',  # Old
+    'https://shimmering-celebration-production-7dd0.up.railway.app/shopify',
 ]
 CHECKER_API_URL = SHOPIFY_APIS[0]
 CHECKER_API_KEY = 'AnonShopii2026!'
