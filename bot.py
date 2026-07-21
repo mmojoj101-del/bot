@@ -1,8 +1,10 @@
-fwom telethon import TelegramClient, events, Button
+from telethon import TelegramClient, events, Button
 import asyncio
 from telethon import errors
 from telethon.tl import types as tl_types, functions
 import aiohttp
+# Connection reuse connector
+_http_connector = aiohttp.TCPConnector(limit=50, enable_cleanup_closed=True)
 import aiofiles
 import os
 import random
@@ -14,16 +16,9 @@ from datetime import datetime, timedelta
 API_ID = 30598540
 API_HASH = '067ae5148b522f3dc9f8ff06df7cab66'
 
-# Shared HTTP session to prevent connection leak
-_http_session = None
-
 async def get_http_session():
-    global _http_session
-    if _http_session is None or _http_session.closed:
-        timeout = aiohttp.ClientTimeout(total=100)
-        connector = aiohttp.TCPConnector(enable_cleanup_closed=True)
-        _http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-    return _http_session
+    timeout = aiohttp.ClientTimeout(total=100)
+    return aiohttp.ClientSession(connector=_http_connector, timeout=timeout)
 
 # Read token from file (auto-updated by token-changer)
 def get_bot_token():
@@ -817,7 +812,7 @@ async def check_card_with_retry(card, sites, proxies, max_retries=999):
         
         return result
     
-    return {'status': 'Declined', 'message': 'All sites exhausted', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
+    return {'status': 'Dead', 'message': 'All sites exhausted', 'card': card, 'gateway': 'Unknown', 'price': '-', 'price_value': 0}
 
 # ===================== STRIPE CHARGE CHECKER =====================
 async def check_card_stripe_charge(card, proxy=None, site=None):
