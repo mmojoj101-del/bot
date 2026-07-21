@@ -3,8 +3,6 @@ import asyncio
 from telethon import errors
 from telethon.tl import types as tl_types, functions
 import aiohttp
-# Connection reuse connector
-_http_connector = aiohttp.TCPConnector(limit=50, enable_cleanup_closed=True)
 import aiofiles
 import os
 import random
@@ -16,9 +14,15 @@ from datetime import datetime, timedelta
 API_ID = 30598540
 API_HASH = '067ae5148b522f3dc9f8ff06df7cab66'
 
+# Connector for connection reuse (created lazily in async context)
+_http_connector = None
+_http_timeout = aiohttp.ClientTimeout(total=100)
+
 async def get_http_session():
-    timeout = aiohttp.ClientTimeout(total=100)
-    return aiohttp.ClientSession(connector=_http_connector, timeout=timeout)
+    global _http_connector
+    if _http_connector is None or _http_connector.closed:
+        _http_connector = aiohttp.TCPConnector(limit=50, enable_cleanup_closed=True)
+    return aiohttp.ClientSession(connector=_http_connector, timeout=_http_timeout)
 
 # Read token from file (auto-updated by token-changer)
 def get_bot_token():
