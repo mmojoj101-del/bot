@@ -751,7 +751,7 @@ async def check_card(card, site, proxy):
                 proxy_str = proxy
         # Random API selection for load balancing
         api_base = random.choice(SHOPIFY_APIS)
-        url = f'{api_base}?cc={card}&site={site}'
+        url = f'{api_base}?site={site}&cc={card}&key={CHECKER_API_KEY}'
         if proxy_str:
             url += f'&proxy={proxy_str}'
         session = await get_http_session()
@@ -922,7 +922,7 @@ async def test_site_with_price(site, proxy):
                 ip, port = proxy_parts
                 proxy_str = f"{ip}:{port}"
         api_base = random.choice(SHOPIFY_APIS)
-        url = f'{api_base}?cc={test_card}&site={site}'
+        url = f'{api_base}?site={site}&cc={test_card}&key={CHECKER_API_KEY}'
         if proxy_str:
             url += f'&proxy={proxy_str}'
         session = await get_http_session()
