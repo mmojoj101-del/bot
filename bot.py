@@ -124,11 +124,8 @@ def clear_session():
     print('[!] Session files cleared')
 
 def start_bot():
-    session_file = 'checker_bot.session'
-    # Always clear session on start to avoid ID mismatch
-    clear_session()
     try:
-        _bot = TelegramClient('checker_bot', API_ID, API_HASH)
+        _bot = TelegramClient(None, API_ID, API_HASH)
         _bot.start(bot_token=BOT_TOKEN)
         return _bot
     except Exception as e:
@@ -136,7 +133,7 @@ def start_bot():
         if 'session' in err or 'wrong session' in err or 'security error' in err:
             print(f'[!] Session error detected, clearing and retrying...')
             clear_session()
-            _bot = TelegramClient('checker_bot', API_ID, API_HASH)
+            _bot = TelegramClient(None, API_ID, API_HASH)
             _bot.start(bot_token=BOT_TOKEN)
             return _bot
         raise e
@@ -173,7 +170,7 @@ async def restart_bot():
             pass
     try:
         LAST_TOKEN = get_bot_token()
-        bot = TelegramClient('checker_bot', API_ID, API_HASH)
+        bot = TelegramClient(None, API_ID, API_HASH)
         await bot.start(bot_token=LAST_TOKEN)
         register_handlers()
         print(f'[+] Bot restarted with new token!')
